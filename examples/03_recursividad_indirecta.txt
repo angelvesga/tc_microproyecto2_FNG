@@ -1,0 +1,8 @@
+# Recursividad indirecta (S -> A B -> B S B -> S A S B ...)
+Variables: S, A, B
+Terminales: a, b
+Inicial: S
+Producciones:
+S -> A B
+A -> B S | a
+B -> S A | b

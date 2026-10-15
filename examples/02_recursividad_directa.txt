@@ -1,0 +1,7 @@
+# Recursividad izquierda directa en S
+Variables: S, A
+Terminales: a, b
+Inicial: S
+Producciones:
+S -> S A | a
+A -> b

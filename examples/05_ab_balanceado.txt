@@ -1,0 +1,9 @@
+# Lenguaje a^n b^n (n >= 1)
+Variables: S, A, B, T
+Terminales: a, b
+Inicial: S
+Producciones:
+S -> A T | A B
+T -> S B
+A -> a
+B -> b

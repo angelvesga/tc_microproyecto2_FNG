@@ -1,0 +1,8 @@
+# S -> ε permitido porque S no aparece a la derecha
+Variables: S, A, B
+Terminales: a, b
+Inicial: S
+Producciones:
+S -> ε | A B
+A -> A B | a
+B -> b

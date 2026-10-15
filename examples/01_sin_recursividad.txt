@@ -1,0 +1,8 @@
+# Gramática simple: no requiere eliminar recursividad
+Variables: S, A, B
+Terminales: a, b
+Inicial: S
+Producciones:
+S -> A B
+A -> a
+B -> b
