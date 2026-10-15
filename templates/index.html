@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Conversor FNC a FNG</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>Conversor de Forma Normal de Chomsky a Greibach</h1>
+    <p>Ingrese una gramática en FNC y observe paso a paso cómo se transforma en FNG.</p>
+  </header>
+
+  <main>
+    <section class="card" id="input-card">
+      <h2>1. Gramática de entrada</h2>
+
+      <div class="row">
+        <label for="example-select">Ejemplo</label>
+        <select id="example-select"><option value="">— elegir un ejemplo —</option></select>
+        <label class="file-btn">Abrir archivo .txt
+          <input type="file" id="file-input" accept=".txt" hidden>
+        </label>
+        <button type="button" id="clear-btn" class="secondary">Limpiar</button>
+      </div>
+
+      <div class="grid">
+        <div>
+          <label for="variables">Variables (no terminales)</label>
+          <input id="variables" placeholder="S, A, B" autocomplete="off">
+        </div>
+        <div>
+          <label for="terminals">Terminales</label>
+          <input id="terminals" placeholder="a, b" autocomplete="off">
+        </div>
+        <div>
+          <label for="start">Símbolo inicial</label>
+          <input id="start" placeholder="S" autocomplete="off">
+        </div>
+      </div>
+
+      <label for="productions">Producciones (una variable por línea; alternativas con <code>|</code>; épsilon: <code>ε</code>)</label>
+      <textarea id="productions" rows="8" spellcheck="false" placeholder="S -> A B | a&#10;A -> a&#10;B -> b"></textarea>
+
+      <label class="check"><input type="checkbox" id="remove-unreachable" checked> Eliminar variables inalcanzables al final</label>
+
+      <div class="row">
+        <button type="button" id="validate-btn" class="secondary">Validar FNC</button>
+        <button type="button" id="auto-btn">Conversión automática</button>
+        <button type="button" id="step-btn">Conversión paso a paso</button>
+      </div>
+      <div id="messages" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="card hidden" id="result-card">
+      <h2>2. Conversión</h2>
+      <div class="row controls">
+        <button type="button" id="prev-btn" class="secondary">← Anterior</button>
+        <button type="button" id="next-btn">[ Siguiente paso ]</button>
+        <button type="button" id="all-btn" class="secondary">Mostrar todos</button>
+        <button type="button" id="reset-btn" class="secondary">Reiniciar</button>
+        <button type="button" id="export-btn" class="secondary">Exportar historial</button>
+        <span id="progress"></span>
+      </div>
+
+      <div class="columns">
+        <div>
+          <h3>Gramática actual</h3>
+          <pre id="current-grammar" class="grammar"></pre>
+          <div id="final-box" class="hidden">
+            <h3>Gramática final (FNG)</h3>
+            <pre id="final-grammar" class="grammar"></pre>
+            <p id="final-status"></p>
+          </div>
+        </div>
+        <div>
+          <h3>Historial de pasos</h3>
+          <ol id="history"></ol>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
