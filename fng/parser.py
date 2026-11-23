@@ -48,16 +48,23 @@ def split_symbol_list(text: str) -> List[str]:
 
 
 def _segment_token(token: str, symbols: Sequence[str]) -> Optional[List[str]]:
-    """Divide ``token`` en símbolos declarados (prefiere el prefijo más largo)."""
-    if token in symbols:
-        return [token]
-    for length in range(len(token) - 1, 0, -1):
-        prefix = token[:length]
-        if prefix in symbols:
-            rest = _segment_token(token[length:], symbols)
-            if rest is not None:
-                return [prefix] + rest
-    return None
+    """Divide ``token`` en símbolos declarados (prefiere el prefijo más largo).
+
+    Programación dinámica desde el final del token: ``best[i]`` es la
+    segmentación de ``token[i:]`` (o None). Evita el backtracking exponencial.
+    """
+    declared = set(symbols)
+    lengths = sorted({len(s) for s in declared if s}, reverse=True)
+    n = len(token)
+    best: List[Optional[List[str]]] = [None] * (n + 1)
+    best[n] = []
+    for start in range(n - 1, -1, -1):
+        for length in lengths:
+            end = start + length
+            if end <= n and best[end] is not None and token[start:end] in declared:
+                best[start] = [token[start:end]] + best[end]
+                break
+    return best[0] if n else None
 
 
 def tokenize_body(text: str, declared: Sequence[str]) -> Tuple[str, ...]:

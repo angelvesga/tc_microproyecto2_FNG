@@ -99,10 +99,108 @@ class ConversionTests(unittest.TestCase):
         second = convert_to_gnf(g).to_text()
         self.assertEqual(first, second)
 
-    def test_rejects_non_cnf(self):
+    def test_non_cnf_input_is_normalized(self):
         g = grammar_from("S", "a", "S", "S -> a a")
+        self.assert_converts(g)
+
+
+class CleanupTests(unittest.TestCase):
+    """Depuración de GLC generales antes de pasar a FNC y FNG."""
+
+    assert_converts = ConversionTests.assert_converts
+
+    def kinds(self, history):
+        return [s.kind for s in history.steps]
+
+    def test_unit_cycle(self):
+        g = grammar_from("S A B", "a b", "S", "S -> A | a S\nA -> B | b\nB -> A | a")
+        history = self.assert_converts(g)
+        self.assertIn("unit", self.kinds(history))
+
+    def test_nullable_chain(self):
+        g = grammar_from("S A B C", "a b", "S", "S -> A B C a\nA -> B | ε\nB -> C\nC -> ε | b")
+        self.assert_converts(g)
+
+    def test_epsilon_with_start_on_right_uses_new_start(self):
+        g = grammar_from("S", "a b", "S", "S -> a S b | ε")
+        history = self.assert_converts(g)
+        final = history.final_grammar
+        self.assertEqual(final.start, "S0")
+        self.assertIn((), final.productions_of("S0"))
+        self.assertFalse(final.start_appears_in_bodies())
+
+    def test_useless_and_unreachable_removed(self):
+        g = grammar_from("S A D E", "a b", "S", "S -> a A | D b\nA -> b\nD -> a D\nE -> a")
+        history = self.assert_converts(g)
+        self.assertNotIn("D", history.final_grammar.variables)
+        self.assertNotIn("E", history.final_grammar.variables)
+        first_cleanup = next(s for s in history.steps if s.kind == "cleanup")
+        self.assertIn("D", first_cleanup.details[0])
+
+    def test_empty_language_is_rejected(self):
+        g = grammar_from("S A", "a", "S", "S -> a S | A\nA -> A a")
         with self.assertRaises(ConversionError):
             convert_to_gnf(g)
+
+    def test_terminals_in_long_bodies(self):
+        g = grammar_from("S", "a b c", "S", "S -> a S b c | c")
+        self.assert_converts(g)
+
+    def test_name_collisions(self):
+        g = grammar_from(
+            "S S0 T1 X1", "a b", "S",
+            "S -> a S b | S0 | ε\nS0 -> T1 X1\nT1 -> a | b\nX1 -> b",
+        )
+        history = self.assert_converts(g)
+        final = history.final_grammar
+        self.assertEqual(len(final.variables), len(set(final.variables)))
+        self.assertNotEqual(final.start, "S0")
+
+    def test_terminal_variables_are_numbered(self):
+        g = grammar_from("S", "a b", "S", "S -> a S b | a b")
+        history = convert_to_gnf(g)
+        cnf_heads = {p["head"]: p["bodies"] for p in history.cnf_grammar["productions"]}
+        self.assertEqual(cnf_heads.get("T1"), ["a"])
+        self.assertEqual(cnf_heads.get("T2"), ["b"])
+
+    def test_large_grammar_fails_cleanly(self):
+        from unittest import mock
+
+        g = grammar_from("S A B", "a b", "S", "S -> A B | a\nA -> B S | b\nB -> S A | a")
+        with mock.patch("fng.converter.MAX_TOTAL_PRODUCTIONS", 12):
+            with self.assertRaises(ConversionError) as caught:
+                convert_to_gnf(g)
+        self.assertIn("demasiado", caught.exception.messages[0])
+
+    def test_indirect_before_direct_for_each_variable(self):
+        g = grammar_from("S A", "a b", "S", "S -> A S | b\nA -> S A | a")
+        history = self.assert_converts(g)
+        for name in ("S", "A"):
+            stages = [s.stage for s in history.steps if s.stage.startswith(name + " (")]
+            self.assertTrue(stages)
+            first_direct = next(i for i, st in enumerate(stages) if "inmediata" in st)
+            self.assertTrue(all("indirecta" in st for st in stages[:first_direct]))
+            self.assertTrue(all("inmediata" in st for st in stages[first_direct:]))
+
+    def test_equivalence_handles_epsilon_and_unit_cycles(self):
+        g = grammar_from("S A", "a", "S", "S -> A | ε\nA -> S | a")
+        same, lang, _ = equivalent_up_to(g, g, 3)
+        self.assertTrue(same)
+        self.assertEqual(lang, {"", "a"})
+
+
+class ParserPerformanceTests(unittest.TestCase):
+    def test_segmentation_is_not_exponential(self):
+        import time
+
+        start = time.perf_counter()
+        result = parse_grammar("S", "a aa", "S", "S -> " + "a" * 200 + "b")
+        self.assertLess(time.perf_counter() - start, 0.5)
+        self.assertEqual(result.grammar.productions_of("S"), [("a" * 200 + "b",)])
+
+    def test_segmentation_prefers_longest(self):
+        g = grammar_from("S", "a aa", "S", "S -> aaa")
+        self.assertEqual(g.productions_of("S"), [("aa", "a")])
 
 
 if __name__ == "__main__":

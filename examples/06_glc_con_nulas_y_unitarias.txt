@@ -1,0 +1,8 @@
+# GLC sin depurar: S aparece a la derecha y genera ε; B -> A y A -> B forman un ciclo unitario
+Variables: S, A, B
+Terminales: a, b
+Inicial: S
+Producciones:
+S -> a S b | A | ε
+A -> B | a
+B -> A | b

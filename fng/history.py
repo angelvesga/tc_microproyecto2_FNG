@@ -9,6 +9,14 @@ from .formatting import format_grammar, format_productions
 from .grammar import Grammar, format_body
 
 
+PHASE_NAMES = {
+    "entrada": "Entrada",
+    "fnc": "Forma Normal de Chomsky",
+    "fng": "Forma Normal de Greibach",
+    "validacion": "Validación",
+}
+
+
 def grammar_snapshot(grammar: Grammar) -> Dict:
     """Copia serializable de la gramática en un instante dado."""
     return {
@@ -36,10 +44,12 @@ class Step:
     highlight: List[str] = field(default_factory=list)  # variables afectadas
     grammar: Optional[Dict] = None
     number: int = 0
+    phase: str = ""  # entrada | fnc | fng | validacion
 
     def to_dict(self) -> Dict:
         return {
             "number": self.number,
+            "phase": self.phase,
             "kind": self.kind,
             "stage": self.stage,
             "title": self.title,
@@ -65,6 +75,8 @@ class History:
     steps: List[Step] = field(default_factory=list)
     final_grammar: Optional[Grammar] = None
     gnf_errors: List[str] = field(default_factory=list)
+    cnf_grammar: Optional[Dict] = None  # gramática al terminar la fase FNC
+    input_was_cnf: bool = False
 
     def add(self, step: Step, grammar: Grammar) -> Step:
         step.number = len(self.steps) + 1
@@ -81,11 +93,19 @@ class History:
             "steps": [s.to_dict() for s in self.steps],
             "is_gnf": self.is_gnf,
             "gnf_errors": self.gnf_errors,
+            "cnf": self.cnf_grammar,
+            "input_was_cnf": self.input_was_cnf,
             "final": grammar_snapshot(self.final_grammar) if self.final_grammar else None,
         }
 
     def to_text(self) -> str:
-        parts = [s.to_text() for s in self.steps]
+        parts = []
+        phase = None
+        for step in self.steps:
+            if step.phase != phase:
+                phase = step.phase
+                parts.append(f"===== {PHASE_NAMES.get(phase, phase).upper()} =====")
+            parts.append(step.to_text())
         if self.final_grammar:
             parts.append("GRAMÁTICA FINAL (FNG)\n" + format_grammar(self.final_grammar))
         return "\n\n".join(parts)

@@ -111,6 +111,19 @@ class Grammar:
         return f"Grammar(V={self.variables}, T={self.terminals}, S={self.start})"
 
 
+def fresh_name(base: str, *grammars: "Grammar") -> str:
+    """Nombre ``base`` (o ``base_2``, ``base_3``...) que no choque con ningún
+    símbolo (variable o terminal) de las gramáticas dadas (RNF08)."""
+    taken = set()
+    for g in grammars:
+        taken |= set(g.variables) | set(g.terminals) | set(g.productions)
+    name, suffix = base, 1
+    while name in taken:
+        suffix += 1
+        name = f"{base}_{suffix}"
+    return name
+
+
 def format_body(body: Sequence[str]) -> str:
     """Texto de la parte derecha de una producción (``ε`` si está vacía)."""
     return " ".join(body) if body else EPSILON

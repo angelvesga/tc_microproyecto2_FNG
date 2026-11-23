@@ -1,9 +1,9 @@
-"""Aplicación web (Flask) para convertir gramáticas de FNC a FNG paso a paso.
+"""Aplicación web (Flask): GLC -> depuración -> FNC -> FNG, paso a paso.
 
 Endpoints:
   GET  /                 Interfaz web.
   GET  /api/examples     Gramáticas de ejemplo (campos de entrada).
-  POST /api/validate     Valida los datos de entrada y la Forma Normal de Chomsky.
+  POST /api/validate     Valida los datos de entrada (e informa si ya está en FNC).
   POST /api/convert      Devuelve el historial completo de la conversión.
 """
 
@@ -37,11 +37,17 @@ def read_grammar_from_request():
 
 
 def analyse(parsed):
-    """Errores de estructura y de FNC (lista vacía = válida)."""
-    errors = list(parsed.errors) + validate_input(parsed.grammar)
-    if not errors:
-        errors += check_cnf(parsed.grammar)
-    return errors
+    """Errores de estructura (lista vacía = válida). No se exige FNC: se depura."""
+    return list(parsed.errors) + validate_input(parsed.grammar)
+
+
+def as_bool(value, default=True):
+    """Interpreta booleanos de JSON aceptando también cadenas ("false", "0")."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
 
 
 @app.get("/")
@@ -73,7 +79,10 @@ def validate():
     if format_errors:
         return jsonify({"ok": False, "errors": format_errors}), 400
     errors = analyse(parsed)
-    return jsonify({"ok": not errors, "errors": errors, "warnings": parsed.warnings})
+    is_cnf = not errors and not check_cnf(parsed.grammar)
+    return jsonify(
+        {"ok": not errors, "errors": errors, "warnings": parsed.warnings, "is_cnf": is_cnf}
+    )
 
 
 @app.post("/api/convert")
@@ -86,7 +95,7 @@ def convert():
         return jsonify({"ok": False, "errors": errors, "warnings": parsed.warnings})
     data = request.get_json(silent=True) or {}
     try:
-        history = convert_to_gnf(parsed.grammar, bool(data.get("remove_unreachable", True)))
+        history = convert_to_gnf(parsed.grammar, as_bool(data.get("remove_unreachable")))
     except ConversionError as error:
         return jsonify({"ok": False, "errors": error.messages})
     return jsonify({"ok": True, "warnings": parsed.warnings, **history.to_dict()})

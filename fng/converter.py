@@ -2,12 +2,14 @@
 
 Algoritmo (cada acción se registra como un :class:`~fng.history.Step`):
 
-1. Validar la entrada (datos y FNC) y separar ``S -> ε`` si existe.
+0. Validar la entrada y depurarla hasta la FNC (ver :mod:`fng.cleanup`):
+   inútiles, inalcanzables, nulas, unitarias, terminales y binarización.
+1. Separar ``S -> ε`` si existe.
 2. Ordenar las variables A1..An (el símbolo inicial es A1).
 3. Para cada Ai, en orden:
-   a. Sustituir toda producción ``Ai -> Aj γ`` con j < i por las producciones de Aj
-      (repetidamente, mientras siga habiendo sustituciones posibles).
-   b. Detectar recursividad izquierda directa ``Ai -> Ai α`` y eliminarla creando
+   a. Recursividad indirecta: sustituir toda producción ``Ai -> Aj γ`` con j < i
+      por las producciones de Aj (mientras siga habiendo sustituciones posibles).
+   b. Recursividad inmediata: detectar ``Ai -> Ai α`` y eliminarla creando
       una variable auxiliar Zi:  ``Ai -> β | β Zi``  y  ``Zi -> α | α Zi``.
 4. Sustitución hacia atrás (de An-1 a A1): las producciones de cada Ai que
    comienzan con variable se sustituyen por las de la variable siguiente, que ya
@@ -21,21 +23,25 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
+from .cleanup import CnfNormalizer
 from .equivalence import DEFAULT_MAX_LENGTH, equivalent_up_to
-from .grammar import Body, Grammar, format_body, format_production
-from .history import History
-from .history import Step
+from .errors import ConversionError
+from .grammar import Grammar, format_body, format_production, fresh_name
+from .history import History, Step, grammar_snapshot
 from .validator import check_cnf, check_gnf, has_epsilon_start_rule, validate_input
 
+__all__ = ["ConversionError", "FngConverter", "convert_to_gnf"]
+
 MAX_SUBSTITUTIONS_PER_VARIABLE = 10000
-
-
-class ConversionError(Exception):
-    """La gramática de entrada no puede convertirse (con mensajes comprensibles)."""
-
-    def __init__(self, messages: List[str]) -> None:
-        super().__init__("\n".join(messages))
-        self.messages = messages
+# Límites para que una gramática que crece demasiado no agote la memoria del
+# servidor: cada paso guarda una copia de la gramática completa.
+MAX_TOTAL_PRODUCTIONS = 2000
+MAX_STEPS = 1500
+MAX_SNAPSHOT_PRODUCTIONS = 300000
+TOO_BIG_MESSAGE = (
+    "La gramática crece demasiado durante la conversión para mostrarse paso a paso "
+    "(más de {limit} {what}). Pruebe con una gramática más pequeña."
+)
 
 
 class FngConverter:
@@ -49,16 +55,26 @@ class FngConverter:
         self.order: List[str] = []
         self.auxiliary_variables: List[str] = []
         self._has_epsilon_start = False
+        self._snapshot_productions = 0
+        self._phase = "entrada"
 
     # ------------------------------------------------------------------
     # Punto de entrada
     # ------------------------------------------------------------------
     def run(self) -> History:
-        errors = validate_input(self.grammar) + check_cnf(self.grammar)
+        errors = validate_input(self.grammar)
         if errors:
             raise ConversionError(errors)
 
+        self._phase = "entrada"
         self._log_input()
+
+        self._phase = "fnc"
+        self.history.input_was_cnf = not check_cnf(self.original)
+        CnfNormalizer(self.grammar, self.original, self._log, self._check_size).run()
+        self.history.cnf_grammar = grammar_snapshot(self.grammar)
+
+        self._phase = "fng"
         self._separate_epsilon_rule()
         self._order_variables()
         for index in range(len(self.order)):
@@ -67,6 +83,8 @@ class FngConverter:
         self._substitute_auxiliary_variables()
         self._remove_unreachable_variables()
         self._restore_epsilon_rule()
+
+        self._phase = "validacion"
         self._final_validation()
         self.history.final_grammar = self.grammar
         return self.history
@@ -83,6 +101,17 @@ class FngConverter:
         details: Optional[List[str]] = None,
         highlight: Optional[List[str]] = None,
     ) -> Step:
+        if len(self.history.steps) >= MAX_STEPS:
+            raise ConversionError([TOO_BIG_MESSAGE.format(limit=MAX_STEPS, what="pasos")])
+        self._snapshot_productions += self._total_productions()
+        if self._snapshot_productions > MAX_SNAPSHOT_PRODUCTIONS:
+            raise ConversionError(
+                [
+                    TOO_BIG_MESSAGE.format(
+                        limit=MAX_SNAPSHOT_PRODUCTIONS, what="producciones en el historial"
+                    )
+                ]
+            )
         step = Step(
             kind=kind,
             stage=stage,
@@ -90,8 +119,18 @@ class FngConverter:
             description=description,
             details=details or [],
             highlight=highlight or [],
+            phase=self._phase,
         )
         return self.history.add(step, self.grammar)
+
+    def _total_productions(self) -> int:
+        return sum(len(b) for b in self.grammar.productions.values())
+
+    def _check_size(self) -> None:
+        if self._total_productions() > MAX_TOTAL_PRODUCTIONS:
+            raise ConversionError(
+                [TOO_BIG_MESSAGE.format(limit=MAX_TOTAL_PRODUCTIONS, what="producciones")]
+            )
 
     # ------------------------------------------------------------------
     # Etapa 0: entrada
@@ -102,9 +141,9 @@ class FngConverter:
             "input",
             "Entrada",
             "Gramática de entrada validada",
-            "Se registraron variables, terminales, símbolo inicial y producciones, "
-            "y la gramática cumple la Forma Normal de Chomsky "
-            "(cada producción es A -> BC o A -> a).",
+            "Se registraron variables, terminales, símbolo inicial y producciones. "
+            "No se asume que esté depurada ni en Forma Normal de Chomsky: primero se "
+            "depura y se lleva a FNC, y luego se convierte a Greibach.",
             [
                 f"Variables: {', '.join(g.variables)}",
                 f"Terminales: {', '.join(g.terminals)}",
@@ -119,7 +158,7 @@ class FngConverter:
         self.grammar.remove_production(self.grammar.start, ())
         self._log(
             "epsilon",
-            "Entrada",
+            "Preparación para FNG",
             f"Se aparta la producción {self.grammar.start} -> ε",
             "La FNC admite S -> ε (S no aparece a la derecha). Se aparta mientras se "
             "transforma el resto y se restaurará al final, pues la FNG la admite bajo "
@@ -154,14 +193,27 @@ class FngConverter:
     # ------------------------------------------------------------------
     def _process_variable(self, index: int) -> None:
         name = self.order[index]
-        stage = f"Procesando {name} (A{index + 1})"
+        label = f"{name} (A{index + 1})"
+        indirect_stage = f"{label} · recursividad indirecta"
+        direct_stage = f"{label} · recursividad inmediata"
 
         def precedes(symbol: str) -> bool:
             position = self._position(symbol)
             return position is not None and position < index
 
-        substitutions = self._substitute_leading(name, precedes, stage, "substitution")
-        recursion_found = self._handle_left_recursion(index, stage)
+        substitutions = self._substitute_leading(
+            name, precedes, indirect_stage, "substitution"
+        )
+        if not substitutions:
+            self._log(
+                "substitution",
+                indirect_stage,
+                f"Recursividad indirecta en {name}: no hay sustituciones",
+                f"Ninguna producción de {name} comienza con una variable anterior "
+                f"a {name} en el orden.",
+                highlight=[name],
+            )
+        recursion_found = self._handle_left_recursion(index, direct_stage)
 
         summary = []
         if not substitutions:
@@ -170,7 +222,7 @@ class FngConverter:
             summary.append(f"{name} no tiene recursividad izquierda directa.")
         self._log(
             "stage",
-            stage,
+            direct_stage,
             f"Gramática tras procesar {name}",
             f"Las producciones de {name} ahora comienzan con un terminal o con una "
             f"variable posterior a {name} en el orden.",
@@ -215,6 +267,7 @@ class FngConverter:
             self.grammar.set_productions(
                 head, bodies[:position] + replacements + bodies[position + 1:]
             )
+            self._check_size()
 
             used = [format_production(variable, d) for d in self.grammar.productions_of(variable)]
             if replacements:
@@ -297,14 +350,7 @@ class FngConverter:
 
     def _new_auxiliary_name(self, index: int) -> str:
         """Nombre único para la variable auxiliar de Ai (RNF08)."""
-        taken = set(self.grammar.variables) | set(self.grammar.terminals)
-        taken |= set(self.original.variables) | set(self.original.terminals)
-        base = f"Z{index + 1}"
-        name, suffix = base, 1
-        while name in taken:
-            suffix += 1
-            name = f"{base}_{suffix}"
-        return name
+        return fresh_name(f"Z{index + 1}", self.grammar, self.original)
 
     # ------------------------------------------------------------------
     # Etapa 3: sustitución hacia atrás
