@@ -66,17 +66,165 @@ async function validate() {
   (data.warnings || []).forEach((w) => showMessage("warn", w));
 }
 
-async function convert(stepByStep) {
-  clearMessages();
-  const data = await post("/api/convert", readInput());
-  if (!data.ok) {
-    $("result-card").classList.add("hidden");
-    return reportErrors(data);
+// ---------------------------------------------------------------------
+// Conversión con avance en vivo: el servidor envía una línea JSON por evento
+// mientras el algoritmo corre (/api/convert-stream).
+// ---------------------------------------------------------------------
+const PHASE_SHORT = { entrada: "Entrada", fnc: "Chomsky", fng: "Greibach", validacion: "Validación" };
+const LOG_SIZE = 6;
+let running = null; // { controller, started, latest, timer, frame }
+
+const seconds = (ms) => (ms / 1000).toLocaleString("es", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " s";
+
+function estimateRemaining(fraction, elapsed) {
+  if (fraction >= 1) return "Ninguno";
+  if (fraction < 0.08 || elapsed < 300) return "Calculando…";
+  const remaining = (elapsed * (1 - fraction)) / fraction;
+  return remaining < 1000 ? "Menos de 1 s" : "≈ " + seconds(remaining);
+}
+
+function paintRun() {
+  // Se dibuja como mucho una vez por fotograma aunque lleguen cientos de eventos.
+  running.frame = 0;
+  const event = running.latest;
+  const elapsed = performance.now() - running.started;
+  $("run-elapsed").textContent = seconds(elapsed);
+  if (!event) return;
+  $("run-activity").textContent = event.activity;
+  $("run-progress").value = event.fraction;
+  $("run-percent").textContent = Math.round(event.fraction * 100) + " %";
+  $("run-steps").textContent = String(event.steps);
+  $("run-eta").textContent = estimateRemaining(event.fraction, elapsed);
+}
+
+function schedulePaint() {
+  if (running && !running.frame) running.frame = requestAnimationFrame(paintRun);
+}
+
+function logStep(step) {
+  const log = $("run-log");
+  const li = el("li");
+  li.dataset.phase = step.phase;
+  li.append(
+    el("span", "n", String(step.number)),
+    el("span", "what", step.title),
+    el("span", "where", PHASE_SHORT[step.phase] || "")
+  );
+  log.prepend(li);
+  while (log.children.length > LOG_SIZE) log.lastElementChild.remove();
+}
+
+function startRun() {
+  const card = $("run-card");
+  card.classList.remove("hidden", "done", "failed");
+  $("run-title").textContent = "Calculando la conversión";
+  $("run-activity").textContent = "Enviando la gramática…";
+  $("run-progress").value = 0;
+  $("run-percent").textContent = "0 %";
+  $("run-steps").textContent = "0";
+  $("run-eta").textContent = "Calculando…";
+  $("run-log").replaceChildren();
+  $("cancel-btn").hidden = false;
+  ["auto-btn", "step-btn", "validate-btn"].forEach((id) => ($(id).disabled = true));
+  running = { controller: new AbortController(), started: performance.now(), latest: null, frame: 0 };
+  // El reloj sigue avanzando aunque el servidor tarde en mandar el siguiente evento.
+  running.timer = setInterval(schedulePaint, 100);
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function finishRun(state, title) {
+  if (!running) return;
+  clearInterval(running.timer);
+  if (running.frame) cancelAnimationFrame(running.frame);
+  paintRun();
+  const elapsed = performance.now() - running.started;
+  const card = $("run-card");
+  card.classList.add(state);
+  $("run-title").textContent = title;
+  $("cancel-btn").hidden = true;
+  if (state === "done") {
+    $("run-progress").value = 1;
+    $("run-percent").textContent = "100 %";
+    $("run-eta").textContent = "Ninguno";
+    $("run-activity").textContent = `Terminó en ${seconds(elapsed)}.`;
   }
-  (data.warnings || []).forEach((w) => showMessage("warn", w));
-  result = data;
+  ["auto-btn", "step-btn", "validate-btn"].forEach((id) => ($(id).disabled = false));
+  running = null;
+}
+
+async function* readLines(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, cut).trim();
+      buffer = buffer.slice(cut + 1);
+      if (line) yield JSON.parse(line);
+    }
+  }
+  if (buffer.trim()) yield JSON.parse(buffer);
+}
+
+async function convert(stepByStep) {
+  if (running) return;
+  clearMessages();
+  $("result-card").classList.add("hidden");
+  startRun();
+  const run = running;
+
+  let final = null;
+  try {
+    const response = await fetch("/api/convert-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(readInput()),
+      signal: run.controller.signal,
+    });
+    const isStream = (response.headers.get("Content-Type") || "").includes("ndjson");
+    if (!isStream) {
+      final = await response.json(); // errores de validación: respuesta JSON normal
+    } else {
+      for await (const event of readLines(response)) {
+        if (event.type === "progress") {
+          run.latest = event;
+          if (event.step) logStep(event.step);
+          schedulePaint();
+        } else {
+          final = event;
+        }
+      }
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      finishRun("failed", "Conversión cancelada");
+      $("run-activity").textContent = "Se detuvo la conversión.";
+      return;
+    }
+    finishRun("failed", "No se pudo completar la conversión");
+    showMessage("error", "Se perdió la conexión con el servidor. Intente de nuevo.");
+    return;
+  }
+
+  if (!final || !final.ok) {
+    const invalid = final && final.type !== "error";
+    finishRun("failed", invalid ? "La gramática tiene errores" : "No se pudo convertir la gramática");
+    $("run-activity").textContent = "Revise los mensajes de abajo.";
+    if (invalid) reportErrors(final);
+    else showMessage("error", "No se pudo convertir la gramática:", (final && final.errors) || []);
+    if (invalid) $("run-card").classList.add("hidden");
+    return;
+  }
+
+  finishRun("done", "Conversión calculada");
+  (final.warnings || []).forEach((w) => showMessage("warn", w));
+  result = final;
   openPhases.clear();
-  shown = stepByStep ? 1 : data.steps.length;
+  shown = stepByStep ? 1 : final.steps.length;
   $("result-card").classList.remove("hidden");
   render();
   $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -419,6 +567,7 @@ $("prev-btn").addEventListener("click", () => {
 $("all-btn").addEventListener("click", () => { shown = result.steps.length; render(); });
 $("reset-btn").addEventListener("click", () => { shown = 1; render(); });
 $("export-btn").addEventListener("click", exportHistory);
+$("cancel-btn").addEventListener("click", () => { if (running) running.controller.abort(); });
 document.addEventListener("keydown", (e) => {
   if (!result || $("result-card").classList.contains("hidden")) return;
   if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;

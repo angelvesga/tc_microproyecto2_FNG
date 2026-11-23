@@ -27,7 +27,9 @@ python -m unittest discover -s tests -t .
 
 ## Estructura
 - `fng/` núcleo (sin dependencias): `grammar`, `parser`, `validator`, `cleanup` (depuración y FNC), `converter` (FNG), `history`, `equivalence`, `formatting`, `errors`
-- `app.py` API Flask (`/api/validate`, `/api/convert`, `/api/examples`, `/api/parse-file`)
+- `app.py` API Flask (`/api/validate`, `/api/convert`, `/api/convert-stream`, `/api/examples`, `/api/parse-file`).
+  `/api/convert-stream` envía el avance mientras el algoritmo corre (NDJSON: una línea por evento), que la
+  interfaz muestra como barra de progreso, actividad actual, tiempo restante estimado y últimos pasos.
 - `templates/`, `static/` interfaz web (modo automático y modo "Siguiente paso")
 - `examples/` gramáticas de ejemplo · `tests/` pruebas
 

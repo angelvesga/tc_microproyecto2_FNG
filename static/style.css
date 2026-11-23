@@ -82,7 +82,7 @@ body {
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
-.hidden { display: none !important; }
+.hidden, [hidden] { display: none !important; }
 code { font-family: var(--mono); font-size: .9em; background: var(--sunk); padding: .05em .35em; border-radius: 4px; }
 
 .skip {
@@ -219,6 +219,40 @@ progress {
 progress::-webkit-progress-bar { background: transparent; }
 progress::-webkit-progress-value { background: var(--action); border-radius: var(--progress-bar-radius); transition: inline-size .25s; }
 progress::-moz-progress-bar { background: var(--action); border-radius: var(--progress-bar-radius); }
+
+/* ---- Panel de progreso mientras el algoritmo corre ---- */
+.run-activity { margin: 0 0 .7rem; font-weight: 600; font-size: 1.05rem; min-height: 1.6em; }
+.run progress { height: .7rem; }
+.run.done progress::-webkit-progress-value { background: var(--ok); }
+.run.done progress::-moz-progress-bar { background: var(--ok); }
+.run.failed progress::-webkit-progress-value { background: var(--err); }
+.run.failed progress::-moz-progress-bar { background: var(--err); }
+.run-meta {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .75rem 1rem;
+  margin: 1rem 0 0;
+}
+.run-meta div { padding: .55rem .75rem; border-radius: var(--r-s); background: var(--sunk); }
+.run-meta dt { font-size: .85rem; color: var(--muted); }
+.run-meta dd { margin: .1rem 0 0; font-weight: 700; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.run-log-title { margin: 1.25rem 0 .5rem; font-size: 1rem; }
+.run-log {
+  list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem;
+  font-size: .93rem; min-height: 3rem;
+}
+.run-log li {
+  --tone: var(--ink);
+  display: flex; gap: .6rem; align-items: baseline; padding: .35rem .6rem; border-radius: var(--r-s);
+  border-left: 3px solid var(--tone); background: var(--paper);
+}
+.run-log li[data-phase="fnc"] { --tone: var(--cnf); }
+.run-log li[data-phase="fng"] { --tone: var(--gnf); }
+.run-log .n { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 3ch; }
+.run-log .where { margin-left: auto; color: var(--tone); font-size: .82rem; white-space: nowrap; }
+@media (prefers-reduced-motion: no-preference) {
+  .run-log li:first-child { animation: step-in .18s ease-out; }
+  @keyframes step-in { from { opacity: 0; translate: 0 -4px; } }
+}
+@media (max-width: 720px) { .run-log .where { display: none; } }
 
 /* ---- Columnas ---- */
 .columns { display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); align-items: start; }

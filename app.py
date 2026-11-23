@@ -5,12 +5,16 @@ Endpoints:
   GET  /api/examples     Gramáticas de ejemplo (campos de entrada).
   POST /api/validate     Valida los datos de entrada (e informa si ya está en FNC).
   POST /api/convert      Devuelve el historial completo de la conversión.
+  POST /api/convert-stream  Igual, pero envía el avance paso a paso (NDJSON).
 """
 
 import glob
+import json
 import os
+import queue
+import threading
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 from fng.converter import ConversionError, convert_to_gnf
 from fng.parser import parse_file_text, parse_grammar
@@ -99,6 +103,68 @@ def convert():
     except ConversionError as error:
         return jsonify({"ok": False, "errors": error.messages})
     return jsonify({"ok": True, "warnings": parsed.warnings, **history.to_dict()})
+
+
+class ConversionCancelled(Exception):
+    """El cliente cerró la conexión: se detiene la conversión en curso."""
+
+
+@app.post("/api/convert-stream")
+def convert_stream():
+    """Igual que /api/convert, pero envía el avance mientras el algoritmo corre.
+
+    La respuesta es NDJSON (un objeto JSON por línea):
+      {"type": "progress", "fraction", "activity", "phase", "steps", "step"}
+      ...
+      {"type": "result", "ok": true, ...historial}   o   {"type": "error", "errors": [...]}
+    """
+    parsed, format_errors = read_grammar_from_request()
+    if format_errors:
+        return jsonify({"ok": False, "errors": format_errors}), 400
+    errors = analyse(parsed)
+    if errors:
+        return jsonify({"ok": False, "errors": errors, "warnings": parsed.warnings})
+    data = request.get_json(silent=True) or {}
+    remove_unreachable = as_bool(data.get("remove_unreachable"))
+
+    events: "queue.Queue[dict]" = queue.Queue()
+    cancelled = threading.Event()
+
+    def on_progress(event):
+        if cancelled.is_set():
+            raise ConversionCancelled()
+        events.put({"type": "progress", **event})
+
+    def work():
+        try:
+            history = convert_to_gnf(parsed.grammar, remove_unreachable, on_progress)
+            events.put({"type": "result", "ok": True, "warnings": parsed.warnings, **history.to_dict()})
+        except ConversionCancelled:
+            events.put({"type": "cancelled"})
+        except ConversionError as error:
+            events.put({"type": "error", "ok": False, "errors": error.messages})
+        except Exception:  # pragma: no cover - error inesperado
+            app.logger.exception("Error inesperado en la conversión")
+            events.put({"type": "error", "ok": False, "errors": ["Error inesperado en el servidor."]})
+
+    def generate():
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        try:
+            while True:
+                event = events.get()
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                if event["type"] != "progress":
+                    break
+        finally:
+            # Si el cliente se desconecta, la próxima llamada de progreso cancela el trabajo.
+            cancelled.set()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if __name__ == "__main__":

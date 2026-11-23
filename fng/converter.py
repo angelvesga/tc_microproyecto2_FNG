@@ -21,7 +21,7 @@ Algoritmo (cada acción se registra como un :class:`~fng.history.Step`):
 
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .cleanup import CnfNormalizer
 from .equivalence import DEFAULT_MAX_LENGTH, equivalent_up_to
@@ -38,6 +38,14 @@ MAX_SUBSTITUTIONS_PER_VARIABLE = 10000
 MAX_TOTAL_PRODUCTIONS = 2000
 MAX_STEPS = 1500
 MAX_SNAPSHOT_PRODUCTIONS = 300000
+# Tramos de la barra de progreso (fracción 0..1) para cada fase.
+PROGRESS_FNC = (0.04, 0.28)
+PROGRESS_FNG = (0.30, 0.75)  # procesamiento de A1..An; luego sustitución hacia atrás
+PROGRESS_BACK = (0.75, 0.85)
+PROGRESS_VALIDATION = 0.92
+
+ProgressCallback = Callable[[Dict], None]
+
 TOO_BIG_MESSAGE = (
     "La gramática crece demasiado durante la conversión para mostrarse paso a paso "
     "(más de {limit} {what}). Pruebe con una gramática más pequeña."
@@ -47,7 +55,15 @@ TOO_BIG_MESSAGE = (
 class FngConverter:
     """Ejecuta la transformación FNC -> FNG registrando cada operación."""
 
-    def __init__(self, grammar: Grammar, remove_unreachable: bool = True) -> None:
+    def __init__(
+        self,
+        grammar: Grammar,
+        remove_unreachable: bool = True,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> None:
+        self.on_progress = on_progress
+        self._fraction = 0.0
+        self._activity = "Validando la entrada"
         self.original = grammar.copy()
         self.grammar = grammar.copy()
         self.remove_unreachable = remove_unreachable
@@ -62,6 +78,7 @@ class FngConverter:
     # Punto de entrada
     # ------------------------------------------------------------------
     def run(self) -> History:
+        self._advance(0.0, "Validando la entrada")
         errors = validate_input(self.grammar)
         if errors:
             raise ConversionError(errors)
@@ -70,24 +87,57 @@ class FngConverter:
         self._log_input()
 
         self._phase = "fnc"
+        self._advance(PROGRESS_FNC[0], "Depurando la gramática y llevándola a FNC")
         self.history.input_was_cnf = not check_cnf(self.original)
         CnfNormalizer(self.grammar, self.original, self._log, self._check_size).run()
         self.history.cnf_grammar = grammar_snapshot(self.grammar)
 
         self._phase = "fng"
+        self._advance(PROGRESS_FNG[0], "Ordenando las variables")
         self._separate_epsilon_rule()
         self._order_variables()
         for index in range(len(self.order)):
             self._process_variable(index)
         self._back_substitute()
+        self._advance(0.86, "Sustituyendo en las variables auxiliares")
         self._substitute_auxiliary_variables()
+        self._advance(0.89, "Limpieza final")
         self._remove_unreachable_variables()
         self._restore_epsilon_rule()
 
         self._phase = "validacion"
+        self._advance(PROGRESS_VALIDATION, "Validando la FNG y comprobando la equivalencia")
         self._final_validation()
         self.history.final_grammar = self.grammar
+        self._advance(1.0, "Conversión terminada")
         return self.history
+
+    # ------------------------------------------------------------------
+    # Progreso (para mostrar el avance mientras el algoritmo corre)
+    # ------------------------------------------------------------------
+    def _advance(self, fraction: float, activity: Optional[str] = None) -> None:
+        """Avanza la fracción estimada (nunca retrocede) e informa la actividad."""
+        self._fraction = max(self._fraction, min(fraction, 1.0))
+        if activity:
+            self._activity = activity
+        self._emit(None)
+
+    def _emit(self, step: Optional[Step]) -> None:
+        if self.on_progress is None:
+            return
+        self.on_progress(
+            {
+                "fraction": round(self._fraction, 4),
+                "activity": self._activity,
+                "phase": self._phase,
+                "steps": len(self.history.steps),
+                "step": (
+                    {"number": step.number, "title": step.title, "stage": step.stage, "phase": step.phase}
+                    if step
+                    else None
+                ),
+            }
+        )
 
     # ------------------------------------------------------------------
     # Registro
@@ -121,7 +171,13 @@ class FngConverter:
             highlight=highlight or [],
             phase=self._phase,
         )
-        return self.history.add(step, self.grammar)
+        self.history.add(step, self.grammar)
+        if self._phase == "fnc":
+            # La depuración tiene pocas etapas: cada paso avanza un poco dentro de su tramo.
+            low, high = PROGRESS_FNC
+            self._fraction = min(high - 0.01, self._fraction + (high - low) / 12)
+        self._emit(step)
+        return step
 
     def _total_productions(self) -> int:
         return sum(len(b) for b in self.grammar.productions.values())
@@ -194,6 +250,12 @@ class FngConverter:
     def _process_variable(self, index: int) -> None:
         name = self.order[index]
         label = f"{name} (A{index + 1})"
+        low, high = PROGRESS_FNG
+        self._advance(
+            low + (high - low) * index / max(len(self.order), 1),
+            f"Procesando {label}, variable {index + 1} de {len(self.order)}: "
+            "recursividad indirecta e inmediata",
+        )
         indirect_stage = f"{label} · recursividad indirecta"
         direct_stage = f"{label} · recursividad inmediata"
 
@@ -358,8 +420,14 @@ class FngConverter:
     def _back_substitute(self) -> None:
         stage = "Sustitución hacia atrás"
         did_something = False
+        total = max(len(self.order) - 1, 1)
         for index in range(len(self.order) - 2, -1, -1):
             name = self.order[index]
+            low, high = PROGRESS_BACK
+            self._advance(
+                low + (high - low) * (total - 1 - index) / total,
+                f"Sustitución hacia atrás en {name}",
+            )
             count = self._substitute_leading(
                 name, lambda s: self._position(s) is not None, stage, "back_substitution"
             )
@@ -480,6 +548,10 @@ class FngConverter:
                 [f"{count} producciones verificadas."],
             )
 
+        self._advance(
+            0.95,
+            f"Comprobando la equivalencia: cadenas de longitud ≤ {DEFAULT_MAX_LENGTH}",
+        )
         result, lang_a, lang_b = equivalent_up_to(self.original, self.grammar)
         if result is None:
             message, ok = (
@@ -509,6 +581,15 @@ class FngConverter:
         )
 
 
-def convert_to_gnf(grammar: Grammar, remove_unreachable: bool = True) -> History:
-    """Convierte ``grammar`` (en FNC) a FNG y devuelve el historial completo."""
-    return FngConverter(grammar, remove_unreachable).run()
+def convert_to_gnf(
+    grammar: Grammar,
+    remove_unreachable: bool = True,
+    on_progress: Optional[ProgressCallback] = None,
+) -> History:
+    """Convierte ``grammar`` (cualquier GLC) a FNG y devuelve el historial completo.
+
+    ``on_progress`` recibe, durante la conversión, diccionarios con la fracción
+    estimada de avance, la actividad en curso y el último paso registrado. Si
+    lanza una excepción, la conversión se detiene (sirve para cancelar).
+    """
+    return FngConverter(grammar, remove_unreachable, on_progress).run()

@@ -72,6 +72,23 @@
       <div id="messages" role="status" aria-live="polite"></div>
     </section>
 
+    <section class="card run hidden" id="run-card" aria-labelledby="run-title">
+      <div class="card-head">
+        <h2 id="run-title">Calculando la conversión</h2>
+        <button type="button" id="cancel-btn" class="ghost">Cancelar conversión</button>
+      </div>
+      <p class="run-activity" id="run-activity">Enviando la gramática…</p>
+      <progress id="run-progress" max="1" value="0" aria-labelledby="run-title"></progress>
+      <dl class="run-meta">
+        <div><dt>Pasos registrados</dt><dd id="run-steps">0</dd></div>
+        <div><dt>Tiempo transcurrido</dt><dd id="run-elapsed">0,0 s</dd></div>
+        <div><dt>Tiempo restante</dt><dd id="run-eta">Calculando…</dd></div>
+        <div><dt>Avance</dt><dd id="run-percent">0 %</dd></div>
+      </dl>
+      <h3 class="run-log-title">Lo que está haciendo el algoritmo</h3>
+      <ol class="run-log" id="run-log" aria-label="Últimos pasos registrados"></ol>
+    </section>
+
     <section class="card hidden" id="result-card" aria-labelledby="result-title">
       <div class="card-head">
         <h2 id="result-title">Conversión</h2>

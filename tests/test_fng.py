@@ -189,6 +189,33 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(lang, {"", "a"})
 
 
+class ProgressTests(unittest.TestCase):
+    """Avance que se muestra mientras el algoritmo corre."""
+
+    GRAMMAR = ("S A B", "a b", "S", "S -> A B | a S b | ε\nA -> B S | a\nB -> S A | b")
+
+    def test_progress_is_monotonic_and_complete(self):
+        events = []
+        history = convert_to_gnf(grammar_from(*self.GRAMMAR), on_progress=events.append)
+        fractions = [e["fraction"] for e in events]
+        self.assertEqual(fractions, sorted(fractions))
+        self.assertEqual(fractions[-1], 1.0)
+        reported = [e["step"]["number"] for e in events if e["step"]]
+        self.assertEqual(reported, [s.number for s in history.steps])
+        self.assertTrue(any("equivalencia" in e["activity"] for e in events))
+
+    def test_callback_can_cancel(self):
+        class Stop(Exception):
+            pass
+
+        def stop_in_greibach(event):
+            if event["phase"] == "fng":
+                raise Stop()
+
+        with self.assertRaises(Stop):
+            convert_to_gnf(grammar_from(*self.GRAMMAR), on_progress=stop_in_greibach)
+
+
 class ParserPerformanceTests(unittest.TestCase):
     def test_segmentation_is_not_exponential(self):
         import time
