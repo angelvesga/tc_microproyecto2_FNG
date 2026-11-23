@@ -3,84 +3,123 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Conversor FNC a FNG</title>
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Convierte una gramática libre de contexto a Forma Normal de Greibach, pasando por la depuración y la Forma Normal de Chomsky, y muestra cada paso.">
+  <title>Conversor GLC a Greibach</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Next:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <header>
-    <h1>Conversor de Forma Normal de Chomsky a Greibach</h1>
-    <p>Ingrese una gramática en FNC y observe paso a paso cómo se transforma en FNG.</p>
+  <a class="skip" href="#input-card">Saltar a la gramática de entrada</a>
+
+  <header class="masthead">
+    <div class="wrap">
+      <p class="formula" aria-hidden="true">G = (V, T, S, P)</p>
+      <h1>De una gramática libre de contexto a la Forma Normal de Greibach</h1>
+      <p class="lede">Escriba cualquier gramática. Primero se depura y se lleva a Forma Normal de Chomsky;
+        luego se transforma en Forma Normal de Greibach. Cada paso queda a la vista con la gramática que produce.</p>
+      <ol class="route" aria-label="Recorrido de la conversión">
+        <li>GLC</li>
+        <li class="route-cnf">Depuración y FNC</li>
+        <li class="route-gnf">FNG</li>
+      </ol>
+    </div>
   </header>
 
-  <main>
-    <section class="card" id="input-card">
-      <h2>1. Gramática de entrada</h2>
-
-      <div class="row">
-        <label for="example-select">Ejemplo</label>
-        <select id="example-select"><option value="">— elegir un ejemplo —</option></select>
-        <label class="file-btn">Abrir archivo .txt
-          <input type="file" id="file-input" accept=".txt" hidden>
-        </label>
-        <button type="button" id="clear-btn" class="secondary">Limpiar</button>
+  <main class="wrap">
+    <section class="card" id="input-card" aria-labelledby="input-title">
+      <div class="card-head">
+        <h2 id="input-title">Gramática de entrada</h2>
+        <div class="tools">
+          <label class="visually-hidden" for="example-select">Cargar un ejemplo</label>
+          <select id="example-select"><option value="">Cargar un ejemplo…</option></select>
+          <label class="button ghost file-btn">Abrir archivo .txt
+            <input type="file" id="file-input" accept=".txt" hidden>
+          </label>
+          <button type="button" id="clear-btn" class="ghost">Vaciar campos</button>
+        </div>
       </div>
 
-      <div class="grid">
+      <div class="fields">
         <div>
-          <label for="variables">Variables (no terminales)</label>
-          <input id="variables" placeholder="S, A, B" autocomplete="off">
+          <label for="variables">Variables</label>
+          <input id="variables" placeholder="S, A, B" autocomplete="off" spellcheck="false">
         </div>
         <div>
           <label for="terminals">Terminales</label>
-          <input id="terminals" placeholder="a, b" autocomplete="off">
+          <input id="terminals" placeholder="a, b" autocomplete="off" spellcheck="false">
         </div>
         <div>
           <label for="start">Símbolo inicial</label>
-          <input id="start" placeholder="S" autocomplete="off">
+          <input id="start" placeholder="S" autocomplete="off" spellcheck="false">
         </div>
       </div>
 
-      <label for="productions">Producciones (una variable por línea; alternativas con <code>|</code>; épsilon: <code>ε</code>)</label>
-      <textarea id="productions" rows="8" spellcheck="false" placeholder="S -> A B | a&#10;A -> a&#10;B -> b"></textarea>
+      <label for="productions">Producciones</label>
+      <p class="hint" id="productions-hint">Una variable por línea, alternativas con <code>|</code> y la cadena vacía con <code>ε</code>.</p>
+      <textarea id="productions" rows="7" spellcheck="false" aria-describedby="productions-hint"
+        placeholder="S -> a S b | A | ε&#10;A -> B | a&#10;B -> A | b"></textarea>
 
-      <label class="check"><input type="checkbox" id="remove-unreachable" checked> Eliminar variables inalcanzables al final</label>
+      <label class="check"><input type="checkbox" id="remove-unreachable" checked> Quitar variables inalcanzables al final</label>
 
-      <div class="row">
-        <button type="button" id="validate-btn" class="secondary">Validar FNC</button>
-        <button type="button" id="auto-btn">Conversión automática</button>
-        <button type="button" id="step-btn">Conversión paso a paso</button>
+      <div class="actions">
+        <button type="button" id="step-btn" class="primary">Convertir paso a paso</button>
+        <button type="button" id="auto-btn" class="secondary">Ver el resultado completo</button>
+        <button type="button" id="validate-btn" class="ghost">Validar gramática</button>
       </div>
       <div id="messages" role="status" aria-live="polite"></div>
     </section>
 
-    <section class="card hidden" id="result-card">
-      <h2>2. Conversión</h2>
-      <div class="row controls">
-        <button type="button" id="prev-btn" class="secondary">← Anterior</button>
-        <button type="button" id="next-btn">[ Siguiente paso ]</button>
-        <button type="button" id="all-btn" class="secondary">Mostrar todos</button>
-        <button type="button" id="reset-btn" class="secondary">Reiniciar</button>
-        <button type="button" id="export-btn" class="secondary">Exportar historial</button>
-        <span id="progress"></span>
+    <section class="card hidden" id="result-card" aria-labelledby="result-title">
+      <div class="card-head">
+        <h2 id="result-title">Conversión</h2>
+        <button type="button" id="export-btn" class="ghost">Exportar historial</button>
+      </div>
+
+      <ol id="phases" class="phases" aria-label="Fases de la conversión"></ol>
+
+      <div class="controls">
+        <button type="button" id="reset-btn" class="ghost" aria-label="Ir al primer paso">⇤</button>
+        <button type="button" id="prev-btn" class="secondary" aria-keyshortcuts="ArrowLeft">Paso anterior</button>
+        <button type="button" id="next-btn" class="primary" aria-keyshortcuts="ArrowRight">Siguiente paso</button>
+        <button type="button" id="all-btn" class="ghost">Ir al final</button>
+        <div class="meter">
+          <label for="progress" id="progress-label">Paso 1 de 1</label>
+          <progress id="progress" max="1" value="1"></progress>
+        </div>
       </div>
 
       <div class="columns">
-        <div>
-          <h3>Gramática actual</h3>
-          <pre id="current-grammar" class="grammar"></pre>
-          <div id="final-box" class="hidden">
-            <h3>Gramática final (FNG)</h3>
-            <pre id="final-grammar" class="grammar"></pre>
+        <aside class="side" aria-label="Gramáticas">
+          <div class="panel" id="current-panel">
+            <div class="panel-head">
+              <h3>Gramática en este paso</h3>
+              <span id="current-phase" class="chip"></span>
+            </div>
+            <p class="diff-legend" id="diff-legend"></p>
+            <pre id="current-grammar" class="grammar" tabindex="0" aria-label="Gramática en este paso"></pre>
+          </div>
+          <div id="cnf-box" class="panel result result-cnf hidden">
+            <div class="panel-head"><h3>Forma Normal de Chomsky</h3><span class="chip chip-cnf">Resultado</span></div>
+            <pre id="cnf-grammar" class="grammar" tabindex="0" aria-label="Gramática en Forma Normal de Chomsky"></pre>
+          </div>
+          <div id="final-box" class="panel result result-gnf hidden">
+            <div class="panel-head"><h3>Forma Normal de Greibach</h3><span class="chip chip-gnf">Resultado</span></div>
+            <pre id="final-grammar" class="grammar" tabindex="0" aria-label="Gramática en Forma Normal de Greibach"></pre>
             <p id="final-status"></p>
           </div>
-        </div>
-        <div>
-          <h3>Historial de pasos</h3>
-          <ol id="history"></ol>
+        </aside>
+        <div class="timeline-col">
+          <h3 class="visually-hidden">Historial de pasos</h3>
+          <div id="history"></div>
         </div>
       </div>
     </section>
   </main>
+
+  <footer class="wrap foot">Microproyecto 2 de Teoría de la Computación</footer>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
