@@ -227,7 +227,13 @@ async function convert(stepByStep) {
   shown = stepByStep ? 1 : final.steps.length;
   $("result-card").classList.remove("hidden");
   render();
-  $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
+  // La barra de botones queda arriba: desde ahí nada cambia de lugar al avanzar.
+  // (Se calcula desde las columnas porque la barra es "sticky" y scrollIntoView
+  // no la ubica bien.)
+  const controls = $("result-card").querySelector(".controls");
+  const gap = parseFloat(getComputedStyle(controls).marginBottom) || 0;
+  const columnsTop = $("result-card").querySelector(".columns").getBoundingClientRect().top;
+  window.scrollTo({ top: scrollY + columnsTop - controls.offsetHeight - gap, behavior: "smooth" });
 }
 
 /**
@@ -385,8 +391,8 @@ function renderPhases(ranges, currentPhase) {
   });
 }
 
-function stepElement(step, isCurrent) {
-  const li = el("li", "step" + (isCurrent ? " current" : ""));
+function stepElement(step) {
+  const li = el("li", "step");
   const head = el("div", "step-head");
   // En Greibach la etapa dice si es recursividad indirecta o inmediata.
   const detail = step.stage.split(" · ")[1];
@@ -400,19 +406,15 @@ function stepElement(step, isCurrent) {
     step.details.forEach((d) => ul.append(el("li", "", d)));
     li.append(ul);
   }
-  if (!isCurrent) {
-    // Cada paso es navegable con el teclado además del ratón.
-    li.tabIndex = 0;
-    li.setAttribute("role", "button");
-    li.setAttribute("aria-label", `Ir al paso ${step.number}: ${step.title}`);
-    const go = () => { shown = step.number; render(); };
-    li.addEventListener("click", go);
-    li.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
-    });
-  } else {
-    li.setAttribute("aria-current", "step");
-  }
+  // Cada paso es navegable con el teclado además del ratón.
+  li.tabIndex = 0;
+  li.setAttribute("role", "button");
+  li.setAttribute("aria-label", `Ir al paso ${step.number}: ${step.title}`);
+  const go = () => { if (shown !== step.number) { shown = step.number; render(); } };
+  li.addEventListener("click", go);
+  li.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
+  });
   return li;
 }
 
@@ -421,24 +423,27 @@ function subgroupName(step) {
   return step.stage.split(" · ")[0];
 }
 
-function renderHistory(currentPhase) {
+// El historial se construye una sola vez por conversión; cada paso solo
+// muestra u oculta lo que cambia (reconstruirlo en cada clic lo volvía lento).
+let historyView = null; // { result, stepNodes, subtitles, groups, shown }
+
+function buildHistory() {
   const container = $("history");
   container.replaceChildren();
-  const visible = result.steps.slice(0, shown);
+  const view = { result, stepNodes: [], subtitles: [], groups: [], shown: 0 };
   PHASES.forEach((phase) => {
-    const steps = visible.filter((s) => s.phase === phase.id);
+    const steps = result.steps.filter((s) => s.phase === phase.id);
     if (!steps.length) return;
     const group = el("details", "phase-group phase-" + phase.id);
-    group.open = phase.id === currentPhase || openPhases.has(phase.id);
+    group.hidden = true;
+    const count = el("span", "group-count");
     const summary = el("summary");
-    summary.append(
-      el("span", "group-name", phase.name),
-      el("span", "group-count", `${steps.length} ${steps.length === 1 ? "paso" : "pasos"}`)
-    );
+    summary.append(el("span", "group-name", phase.name), count);
     group.append(summary);
     group.addEventListener("toggle", () => {
       if (group.open) openPhases.add(phase.id); else openPhases.delete(phase.id);
     });
+    view.groups.push({ id: phase.id, node: group, count, first: steps[0].number, size: steps.length });
 
     if (phase.id === "fnc" && result.input_was_cnf) {
       group.append(el("p", "note",
@@ -453,6 +458,8 @@ function renderHistory(currentPhase) {
       const sub = subgroupName(step);
       if (!sublist || (withSubstages && sub !== lastSub)) {
         lastSub = sub;
+        // Subtítulo y lista aparecen juntos cuando se llega a su primer paso.
+        const nodes = [];
         if (withSubstages) {
           const title = el("div", "substage");
           if (/^\S+ \([^)]*\)$/.test(sub)) {
@@ -461,18 +468,81 @@ function renderHistory(currentPhase) {
           } else {
             title.textContent = sub;
           }
-          group.append(title);
+          nodes.push(title);
         }
         sublist = el("ol", "steps");
-        group.append(sublist);
+        nodes.push(sublist);
+        nodes.forEach((n) => { n.hidden = true; group.append(n); });
+        view.subtitles.push({ nodes, first: step.number });
       }
-      sublist.append(stepElement(step, step.number === shown));
+      const node = stepElement(step);
+      node.hidden = true;
+      view.stepNodes[step.number - 1] = node;
+      sublist.append(node);
     });
     container.append(group);
   });
-  const current = container.querySelector(".step.current");
-  if (current) current.scrollIntoView({ block: "nearest" });
+  return view;
 }
+
+function renderHistory(currentPhase) {
+  if (!historyView || historyView.result !== result) historyView = buildHistory();
+  const view = historyView;
+  const previous = view.shown;
+
+  // Solo cambian los pasos entre el número anterior y el nuevo.
+  const low = Math.min(previous, shown);
+  const high = Math.max(previous, shown);
+  for (let i = low; i < high; i++) view.stepNodes[i].hidden = i >= shown;
+  if (previous) {
+    const old = view.stepNodes[previous - 1];
+    old.classList.remove("current");
+    old.removeAttribute("aria-current");
+  }
+  const current = view.stepNodes[shown - 1];
+  current.classList.add("current");
+  current.setAttribute("aria-current", "step");
+
+  view.subtitles.forEach((s) => s.nodes.forEach((n) => { n.hidden = s.first > shown; }));
+  view.groups.forEach((g) => {
+    const visible = Math.min(Math.max(shown - g.first + 1, 0), g.size);
+    g.node.hidden = visible === 0;
+    g.count.textContent = `${visible} ${visible === 1 ? "paso" : "pasos"}`;
+    const open = g.id === currentPhase || openPhases.has(g.id);
+    if (g.node.open !== open) g.node.open = open;
+  });
+  view.shown = shown;
+  keepStepInView(current);
+}
+
+/**
+ * Muestra el paso actual desplazando solo el historial (no la página), para
+ * que la barra de botones y la gramática no salten en cada paso. En pantallas
+ * angostas el historial no tiene desplazamiento propio: ahí se mueve la página
+ * solo si el paso quedó fuera de la vista.
+ */
+function keepStepInView(node) {
+  const box = $("history");
+  const margin = 8;
+  if (getComputedStyle(box).overflowY !== "visible") {
+    // Pantalla ancha: el historial tiene su propio desplazamiento y la página no se mueve.
+    const area = box.getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    if (rect.top < area.top || rect.height > area.height) box.scrollTop += rect.top - area.top - margin;
+    else if (rect.bottom > area.bottom) box.scrollTop += rect.bottom - area.bottom + margin;
+    return;
+  }
+  const top = $("result-card").querySelector(".controls").getBoundingClientRect().bottom;
+  const rect = node.getBoundingClientRect();
+  if (rect.top < top || rect.bottom > window.innerHeight) node.scrollIntoView({ block: "nearest" });
+}
+
+// Altura de la barra fija de controles, para que lo de abajo no quede tapado.
+new ResizeObserver(([entry]) => {
+  $("result-card").style.setProperty("--controls-h", entry.target.offsetHeight + "px");
+}).observe(document.querySelector("#result-card .controls"));
+
+let staticRenderedFor = null; // resultado cuyo FNC/FNG final ya está dibujado
 
 function render() {
   const steps = result.steps;
@@ -490,13 +560,17 @@ function render() {
   chip.textContent = (PHASE_BY_ID[currentPhase] || {}).name || "";
   chip.dataset.phase = currentPhase;
 
+  // La FNC y la FNG final no cambian entre pasos: se dibujan una vez por conversión.
+  const firstRender = staticRenderedFor !== result;
+  staticRenderedFor = result;
+
   const cnfDone = ranges.fnc && shown > ranges.fnc.last && result.cnf;
   $("cnf-box").classList.toggle("hidden", !cnfDone);
-  if (cnfDone) renderGrammar($("cnf-grammar"), result.cnf);
+  if (firstRender && result.cnf) renderGrammar($("cnf-grammar"), result.cnf);
 
   const finished = shown === steps.length;
   $("final-box").classList.toggle("hidden", !finished);
-  if (finished) {
+  if (firstRender && result.final) {
     renderGrammar($("final-grammar"), result.final);
     const status = $("final-status");
     status.className = result.is_gnf ? "ok" : "err";

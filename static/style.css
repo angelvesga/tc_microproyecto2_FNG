@@ -203,7 +203,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .phase.pending .phase-name { color: var(--muted); }
 
 /* ---- Controles y progreso ---- */
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: 1.25rem; }
+/* La barra queda fija arriba al recorrer los pasos: los botones no cambian de lugar. */
+.controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: 1.25rem;
+  position: sticky; top: 0; z-index: 5; padding-block: .6rem;
+  background: var(--surface); box-shadow: 0 1px 0 var(--line);
+}
 #reset-btn { padding-inline: .8rem; font-size: 1.15rem; }
 .meter { margin-left: auto; display: grid; gap: .3rem; min-width: min(16rem, 100%); }
 .meter label { margin: 0; font-weight: 600; font-size: .9rem; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
@@ -257,7 +262,10 @@ progress::-moz-progress-bar { background: var(--action); border-radius: var(--pr
 /* ---- Columnas ---- */
 .columns { display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); align-items: start; }
 @media (max-width: 880px) { .columns { grid-template-columns: minmax(0, 1fr); } }
-.side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; position: sticky; top: 1rem; min-width: 0; }
+/* En pantalla ancha las columnas ocupan al menos una pantalla bajo la barra fija:
+   así la página puede dejar la barra arriba desde el paso 1 y no cambia de alto al avanzar. */
+@media (min-width: 881px) { .columns { min-height: calc(100vh - var(--controls-h, 0px) - 1.25rem); } }
+.side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; position: sticky; top: calc(var(--controls-h, 0px) + 1rem); min-width: 0; }
 .timeline-col { min-width: 0; }
 @media (max-width: 880px) { .side { position: static; } }
 
@@ -296,7 +304,8 @@ progress::-moz-progress-bar { background: var(--action); border-radius: var(--pr
 #final-status.err { color: var(--err); }
 
 /* ---- Historial: una línea de tiempo por fase (acordeón nativo) ---- */
-#history { display: grid; gap: .75rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .25rem; }
+#history { display: grid; gap: .75rem; max-height: calc(100vh - var(--controls-h, 0px) - 2rem); overflow-y: auto; padding-right: .25rem; }
+#history .step { scroll-margin-top: calc(var(--controls-h, 0px) + .5rem); }
 @media (max-width: 880px) { #history { max-height: none; overflow: visible; padding-right: 0; } }
 .phase-group { --tone: var(--ink); --tone-soft: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface); }
 .phase-group.phase-fnc { --tone: var(--cnf); --tone-soft: var(--cnf-soft); }
