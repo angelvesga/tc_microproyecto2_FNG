@@ -1,22 +1,33 @@
-"""Conversión de una gramática en FNC a Forma Normal de Greibach, paso a paso.
+"""Conversión de una gramática a Forma Normal de Greibach, paso a paso.
 
-Algoritmo (cada acción se registra como un :class:`~fng.history.Step`):
+Sigue el procedimiento de la guía del curso (``guia_FNC_FNG.pdf`` y las
+diapositivas de FNG). Cada acción se registra como un :class:`~fng.history.Step`:
 
-0. Validar la entrada y depurarla hasta la FNC (ver :mod:`fng.cleanup`):
-   inútiles, inalcanzables, nulas, unitarias, terminales y binarización.
-1. Separar ``S -> ε`` si existe.
-2. Ordenar las variables A1..An (el símbolo inicial es A1).
-3. Para cada Ai, en orden:
-   a. Recursividad indirecta: sustituir toda producción ``Ai -> Aj γ`` con j < i
-      por las producciones de Aj (mientras siga habiendo sustituciones posibles).
-   b. Recursividad inmediata: detectar ``Ai -> Ai α`` y eliminarla creando
-      una variable auxiliar Zi:  ``Ai -> β | β Zi``  y  ``Zi -> α | α Zi``.
-4. Sustitución hacia atrás (de An-1 a A1): las producciones de cada Ai que
-   comienzan con variable se sustituyen por las de la variable siguiente, que ya
-   comienzan con terminal.
-5. Sustituir en las variables auxiliares Zi los inicios con variable.
+0. Validar la entrada y llevarla a FNC como en la guía (ver :mod:`fng.cleanup`).
+1. Separar ``S -> ε`` si existe (se restaura al final).
+2. Ordenar y enumerar las variables X1..Xn, con el símbolo inicial como X1. El
+   orden es el de la FNC (cada Yk tras la variable que la originó y las
+   variables de terminales A1, B1, ... al final); además, como hace la guía con
+   A, se baja al final toda variable cuyo descenso reduzca las producciones
+   ``Xi -> Xj α`` con i > j.
+3. Fase 1, recursividad indirecta en TODAS las variables (X1..Xn): eliminar
+   ``Xi -> Xj α`` con j < i sustituyendo Xj por sus producciones. Si Xj aún
+   tiene recursividad inmediata, a Xj se le quita antes (si no, la sustitución
+   no terminaría, y usar solo sus producciones no recursivas perdería cadenas).
+4. Fase 2, recursividad inmediata en TODAS las variables: ``Xi -> Xi α`` se
+   elimina con la variable auxiliar Xi.1:  ``Xi -> β | β Xi.1`` y
+   ``Xi.1 -> α | α Xi.1``.
+5. Reemplazar, de la última variable a la primera, las producciones que
+   comienzan con variable por las producciones de esa variable (que ya empiezan
+   con terminal); luego en las auxiliares Xi.1.
 6. Eliminar variables inalcanzables (opcional), restaurar ``S -> ε`` y validar FNG.
 7. Verificar la equivalencia con la gramática original (cadenas hasta longitud 6).
+
+La guía elimina la recursión entre dos variables sustituyendo solo las
+producciones "no recursivas" de la otra; ese atajo cambia el lenguaje (en su
+propio ejercicio se pierde, por ejemplo, ``ccda``), así que aquí se usa el orden
+X1 < X2 < ... para sustituir, que da el mismo resultado cuando el atajo es
+válido y conserva siempre el lenguaje.
 """
 
 from __future__ import annotations
@@ -26,7 +37,7 @@ from typing import Callable, Dict, List, Optional
 from .cleanup import CnfNormalizer
 from .equivalence import DEFAULT_MAX_LENGTH, equivalent_up_to
 from .errors import ConversionError
-from .grammar import Grammar, format_body, format_production, fresh_name
+from .grammar import Grammar, format_body, format_production
 from .history import History, Step, grammar_snapshot
 from .validator import check_cnf, check_gnf, has_epsilon_start_rule, validate_input
 
@@ -40,7 +51,9 @@ MAX_STEPS = 1500
 MAX_SNAPSHOT_PRODUCTIONS = 300000
 # Tramos de la barra de progreso (fracción 0..1) para cada fase.
 PROGRESS_FNC = (0.04, 0.28)
-PROGRESS_FNG = (0.30, 0.75)  # procesamiento de A1..An; luego sustitución hacia atrás
+PROGRESS_FNG = (0.30, 0.75)  # fases 1 y 2 sobre X1..Xn; luego sustitución hacia atrás
+PROGRESS_FNG_INDIRECT = (0.30, 0.55)
+PROGRESS_FNG_IMMEDIATE = (0.55, 0.75)
 PROGRESS_BACK = (0.75, 0.85)
 PROGRESS_VALIDATION = 0.92
 
@@ -70,6 +83,9 @@ class FngConverter:
         self.history = History()
         self.order: List[str] = []
         self.auxiliary_variables: List[str] = []
+        self.terminal_variables: List[str] = []
+        self.enumeration: Dict[str, str] = {}  # Xk -> nombre en la FNC
+        self._immediate_done: set = set()  # posiciones con la inmediata ya resuelta
         self._has_epsilon_start = False
         self._snapshot_productions = 0
         self._phase = "entrada"
@@ -89,15 +105,23 @@ class FngConverter:
         self._phase = "fnc"
         self._advance(PROGRESS_FNC[0], "Depurando la gramática y llevándola a FNC")
         self.history.input_was_cnf = not check_cnf(self.original)
-        CnfNormalizer(self.grammar, self.original, self._log, self._check_size).run()
+        normalizer = CnfNormalizer(self.grammar, self._log, self._check_size)
+        normalizer.run()
+        self.terminal_variables = normalizer.terminal_variables
         self.history.cnf_grammar = grammar_snapshot(self.grammar)
 
         self._phase = "fng"
-        self._advance(PROGRESS_FNG[0], "Ordenando las variables")
+        self._advance(PROGRESS_FNG[0], "Ordenando y enumerando las variables")
         self._separate_epsilon_rule()
         self._order_variables()
+        # Como lo pide el curso: primero la recursividad indirecta en TODAS las
+        # variables y después la inmediata en todas.
         for index in range(len(self.order)):
-            self._process_variable(index)
+            self._indirect_phase(index)
+        self._log_phase_summary(1)
+        for index in range(len(self.order)):
+            self._immediate_phase(index)
+        self._log_phase_summary(2)
         self._back_substitute()
         self._advance(0.86, "Sustituyendo en las variables auxiliares")
         self._substitute_auxiliary_variables()
@@ -225,20 +249,90 @@ class FngConverter:
     # ------------------------------------------------------------------
     # Etapa 1: orden de las variables
     # ------------------------------------------------------------------
+    def _backward_count(self, order: List[str]) -> int:
+        """Producciones Xi -> Xj α con i > j para un orden dado."""
+        position = {v: k for k, v in enumerate(order)}
+        return sum(
+            1
+            for head, body in self.grammar.all_productions()
+            if body and body[0] != head and body[0] in position
+            and position[body[0]] < position[head]
+        )
+
+    def _choose_order(self) -> tuple:
+        """Orden de la guía: inicial primero, el resto como en la FNC y las
+        variables de terminales al final. Luego se baja al final del bloque
+        cada variable cuyo descenso reduzca las producciones Xi -> Xj α (i > j)."""
+        g = self.grammar
+        block = [v for v in g.variables if v != g.start and v not in self.terminal_variables]
+        tail = [v for v in g.variables if v in self.terminal_variables]
+        order = [g.start] + block + tail
+        initial_count = self._backward_count(order)
+        moved = []
+        for variable in list(block):
+            current = self._backward_count(order)
+            candidate = [v for v in order if v != variable and v not in tail]
+            candidate += [variable] + tail
+            improved = self._backward_count(candidate)
+            if improved < current:
+                order = candidate
+                moved.append((variable, current, improved))
+        return order, initial_count, moved
+
+    def _enumeration_prefix(self, size: int) -> str:
+        """Prefijo para X1..Xn (y Xi.1) que no choque con ningún terminal."""
+        terminals = set(self.grammar.terminals)
+        for prefix in ("X", "V", "W", "U", "Q"):
+            if not any(t.startswith(prefix) and t[len(prefix):][:1].isdigit() for t in terminals):
+                return prefix
+        return "N_"  # pragma: no cover - improbable
+
     def _order_variables(self) -> None:
         g = self.grammar
-        self.order = [g.start] + [v for v in g.variables if v != g.start]
-        details = [f"A{i + 1} = {name}" for i, name in enumerate(self.order)]
+        order, initial_count, moved = self._choose_order()
+        prefix = self._enumeration_prefix(len(order))
+        rename = {old: f"{prefix}{k + 1}" for k, old in enumerate(order)}
+        self.enumeration = {new: old for old, new in rename.items()}
+
+        g.variables = [rename[v] for v in order]
+        g.productions = {
+            rename[h]: [tuple(rename.get(s, s) for s in b) for b in g.productions_of(h)]
+            for h in order
+            if h in g.productions
+        }
+        g.start = rename[g.start]
+        self.terminal_variables = [rename[v] for v in self.terminal_variables]
+        self.order = list(g.variables)
+
+        details = [
+            f"{rename[old]} = {old}" + (" (símbolo inicial)" if k == 0 else "")
+            for k, old in enumerate(order)
+        ]
+        for variable, before, after in moved:
+            details.append(
+                f"Se bajó {variable} al final ({rename[variable]}): las producciones "
+                f"Xi -> Xj α con i > j pasan de {before} a {after}."
+            )
+        details.append(
+            f"Producciones Xi -> Xj α con i > j con este orden: {self._backward_count(self.order)}"
+            + (f" (en el orden de la FNC eran {initial_count})." if moved else ".")
+        )
         self._log(
             "order",
-            "Ordenamiento de variables",
-            "Orden de las variables",
-            "Se establece el orden A1 < A2 < ... < An (el símbolo inicial es A1, el "
-            "resto sigue el orden de declaración). Este orden guía las sustituciones: "
-            "toda producción Ai -> Aj... deberá cumplir j > i.",
+            "Ordenar y enumerar las variables",
+            f"Enumeración de las variables {self.order[0]}..{self.order[-1]}",
+            "Se ordenan y enumeran las variables con el símbolo inicial como "
+            f"{self.order[0]}; el resto sigue el orden de la FNC (cada Y tras la "
+            "variable que la originó) y las variables de terminales van al final. "
+            "Como en la guía, se cambia de lugar una variable cuando así quedan menos "
+            "producciones Xi -> Xj α con i > j.",
             details,
             highlight=list(self.order),
         )
+
+    def _label(self, name: str) -> str:
+        """Etiqueta de la etapa de una variable: "X6 (B)" (nombre en la FNC)."""
+        return f"{name} ({self.enumeration.get(name, name)})"
 
     def _position(self, symbol: str) -> Optional[int]:
         """Posición de ``symbol`` en el orden (None si no es una variable ordenada)."""
@@ -247,50 +341,96 @@ class FngConverter:
     # ------------------------------------------------------------------
     # Etapa 2: sustituciones y recursividad izquierda
     # ------------------------------------------------------------------
-    def _process_variable(self, index: int) -> None:
+    def _indirect_phase(self, index: int) -> None:
+        """Fase 1: eliminar ``Xi -> Xj α`` con j < i sustituyendo Xj.
+
+        Si Xj todavía tiene recursividad inmediata, sustituirla dejaría otra vez
+        ``Xi -> Xj ...`` sin terminar nunca (y usar solo sus producciones no
+        recursivas cambiaría el lenguaje), así que a Xj se le quita antes su
+        recursividad inmediata y queda registrado el motivo.
+        """
         name = self.order[index]
-        label = f"{name} (A{index + 1})"
-        low, high = PROGRESS_FNG
+        label = self._label(name)
+        low, high = PROGRESS_FNG_INDIRECT
         self._advance(
             low + (high - low) * index / max(len(self.order), 1),
-            f"Procesando {label}, variable {index + 1} de {len(self.order)}: "
-            "recursividad indirecta e inmediata",
+            f"Fase 1, recursividad indirecta: {label}, variable {index + 1} de {len(self.order)}",
         )
-        indirect_stage = f"{label} · recursividad indirecta"
-        direct_stage = f"{label} · recursividad inmediata"
+        stage = f"Fase 1: recursividad indirecta · {label}"
 
         def precedes(symbol: str) -> bool:
             position = self._position(symbol)
             return position is not None and position < index
 
+        def prepare(variable: str, body: tuple) -> None:
+            position = self._position(variable)
+            if position is None or position in self._immediate_done:
+                return
+            if not any(b and b[0] == variable for b in self.grammar.productions_of(variable)):
+                return
+            self._log(
+                "detect",
+                stage,
+                f"{variable} todavía tiene recursividad inmediata: se elimina antes",
+                f"Para sustituir {variable} en '{format_production(name, body)}' hace falta "
+                f"que {variable} no tenga producciones {variable} -> {variable} α: si no, la "
+                f"sustitución volvería a dejar {name} -> {variable} ... sin terminar nunca, y "
+                f"usar solo sus producciones no recursivas perdería cadenas. Por eso su "
+                "recursividad inmediata se adelanta a la fase 1.",
+                highlight=[name, variable],
+            )
+            self._handle_left_recursion(position, stage)
+
         substitutions = self._substitute_leading(
-            name, precedes, indirect_stage, "substitution"
+            name, precedes, stage, "substitution", before_replace=prepare
         )
         if not substitutions:
             self._log(
                 "substitution",
-                indirect_stage,
-                f"Recursividad indirecta en {name}: no hay sustituciones",
+                stage,
+                f"Producciones {name} -> Xj α con j < i: no hay",
                 f"Ninguna producción de {name} comienza con una variable anterior "
-                f"a {name} en el orden.",
+                f"a {name} en la enumeración.",
                 highlight=[name],
             )
-        recursion_found = self._handle_left_recursion(index, direct_stage)
 
-        summary = []
-        if not substitutions:
-            summary.append(f"{name} no necesitó sustituciones.")
-        if not recursion_found:
-            summary.append(f"{name} no tiene recursividad izquierda directa.")
-        self._log(
-            "stage",
-            direct_stage,
-            f"Gramática tras procesar {name}",
-            f"Las producciones de {name} ahora comienzan con un terminal o con una "
-            f"variable posterior a {name} en el orden.",
-            summary,
-            highlight=[name],
+    def _immediate_phase(self, index: int) -> None:
+        """Fase 2: eliminar ``Xi -> Xi α`` con la variable auxiliar Xi.1."""
+        name = self.order[index]
+        label = self._label(name)
+        low, high = PROGRESS_FNG_IMMEDIATE
+        self._advance(
+            low + (high - low) * index / max(len(self.order), 1),
+            f"Fase 2, recursividad inmediata: {label}, variable {index + 1} de {len(self.order)}",
         )
+        stage = f"Fase 2: recursividad inmediata · {label}"
+        if index in self._immediate_done:
+            self._log(
+                "detect",
+                stage,
+                f"Recursividad inmediata en {name}: ya se eliminó en la fase 1",
+                f"Se adelantó porque hacía falta para sustituir {name} en otra variable.",
+                highlight=[name],
+            )
+            return
+        self._handle_left_recursion(index, stage)
+
+    def _log_phase_summary(self, phase: int) -> None:
+        if phase == 1:
+            title = "Gramática tras la fase 1 (recursividad indirecta)"
+            description = (
+                "Ninguna producción Xi -> Xj α tiene j < i: la única recursividad por la "
+                "izquierda que queda es inmediata (Xi -> Xi α)."
+            )
+            stage = "Fase 1: recursividad indirecta"
+        else:
+            title = "Gramática tras la fase 2 (recursividad inmediata)"
+            description = (
+                "Ya no hay recursividad por la izquierda: cada producción de Xi comienza "
+                "con un terminal o con una variable posterior a Xi en la enumeración."
+            )
+            stage = "Fase 2: recursividad inmediata"
+        self._log("stage", stage, title, description, highlight=list(self.order))
 
     def _substitute_leading(
         self,
@@ -298,10 +438,13 @@ class FngConverter:
         should_replace: Callable[[str], bool],
         stage: str,
         kind: str,
+        before_replace: Optional[Callable[[str, tuple], None]] = None,
     ) -> int:
         """Sustituye repetidamente cada ``head -> V γ`` donde ``should_replace(V)``.
 
-        Devuelve cuántas sustituciones se hicieron. Cada una queda registrada.
+        ``before_replace(V, cuerpo)`` se llama antes de cada sustitución (puede
+        transformar las producciones de V). Devuelve cuántas sustituciones se
+        hicieron. Cada una queda registrada.
         """
         count = 0
         while True:
@@ -325,6 +468,8 @@ class FngConverter:
                 )
             body = bodies[position]
             variable, tail = body[0], body[1:]
+            if before_replace is not None:
+                before_replace(variable, body)
             replacements = [d + tail for d in self.grammar.productions_of(variable)]
             self.grammar.set_productions(
                 head, bodies[:position] + replacements + bodies[position + 1:]
@@ -351,6 +496,7 @@ class FngConverter:
     def _handle_left_recursion(self, index: int, stage: str) -> bool:
         """Detecta y elimina ``Ai -> Ai α``. Devuelve True si había recursividad."""
         name = self.order[index]
+        self._immediate_done.add(index)
         bodies = self.grammar.productions_of(name)
         recursive = [b for b in bodies if b and b[0] == name]
         if not recursive:
@@ -378,7 +524,7 @@ class FngConverter:
         trivial = [b for b in recursive if len(b) == 1]
 
         aux = self._new_auxiliary_name(index)
-        self.grammar.add_variable(aux)
+        self.grammar.add_variable(aux, after=name)
         self.auxiliary_variables.append(aux)
 
         new_head = list(betas) + [b + (aux,) for b in betas]
@@ -403,16 +549,21 @@ class FngConverter:
             "left_recursion",
             stage,
             f"Eliminación de recursividad izquierda en {name}: nueva variable {aux}",
-            f"Se reemplaza {name} -> {name} α | β por {name} -> β | β {aux} y "
-            f"{aux} -> α | α {aux}, que generan el mismo lenguaje.",
+            f"{name} -> {name} α1 | ... | {name} αn | β1 | ... | βm se transforma en "
+            f"{name} -> β1 | ... | βm | β1 {aux} | ... | βm {aux} y "
+            f"{aux} -> α1 | ... | αn | α1 {aux} | ... | αn {aux}, que generan el mismo lenguaje.",
             details,
             highlight=[name, aux],
         )
         return True
 
     def _new_auxiliary_name(self, index: int) -> str:
-        """Nombre único para la variable auxiliar de Ai (RNF08)."""
-        return fresh_name(f"Z{index + 1}", self.grammar, self.original)
+        """Variable auxiliar Xi.1 de la guía (Xi.2, ... si el nombre ya existe)."""
+        g = self.grammar
+        base, number = self.order[index], 1
+        while f"{base}.{number}" in g.variables or f"{base}.{number}" in g.terminals:
+            number += 1
+        return f"{base}.{number}"
 
     # ------------------------------------------------------------------
     # Etapa 3: sustitución hacia atrás

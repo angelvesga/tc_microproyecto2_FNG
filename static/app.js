@@ -308,7 +308,7 @@ function describeDiff({ added, removed }) {
 const PHASES = [
   { id: "entrada", short: "Entrada", name: "Entrada", hint: "Validación de los datos" },
   { id: "fnc", short: "Chomsky", name: "Forma Normal de Chomsky",
-    hint: "Inútiles, inalcanzables, nulas, unitarias y FNC" },
+    hint: "Inútiles, ε, unitarias y FNC (como la guía)" },
   { id: "fng", short: "Greibach", name: "Forma Normal de Greibach",
     hint: "Recursividad indirecta e inmediata, sustituciones" },
   { id: "validacion", short: "Validación", name: "Validación", hint: "FNG y equivalencia" },
@@ -417,7 +417,7 @@ function stepElement(step, isCurrent) {
 }
 
 function subgroupName(step) {
-  // En Greibach se agrupa por variable: "S (A1) · recursividad indirecta" -> "S (A1)".
+  // En Greibach se agrupa por variable: "X6 (B) · recursividad indirecta" -> "X6 (B)".
   return step.stage.split(" · ")[0];
 }
 
@@ -455,7 +455,7 @@ function renderHistory(currentPhase) {
         lastSub = sub;
         if (withSubstages) {
           const title = el("div", "substage");
-          if (/\(A\d+\)$/.test(sub)) {
+          if (/^\S+ \([^)]*\)$/.test(sub)) {
             const [name, order] = sub.split(" (");
             title.append(`Variable ${name} `, el("small", "", `(${order}`));
           } else {

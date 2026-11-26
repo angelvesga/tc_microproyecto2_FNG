@@ -79,19 +79,23 @@ class ConversionTests(unittest.TestCase):
     def test_direct_left_recursion_creates_auxiliary(self):
         g = grammar_from("S A", "a b", "S", "S -> S A | a\nA -> b")
         history = self.assert_converts(g)
-        self.assertIn("Z1", history.final_grammar.variables)
+        # Variable auxiliar Xi.1 de la guía (S queda enumerada como X1).
+        self.assertIn("X1.1", history.final_grammar.variables)
         self.assertTrue(any(s.kind == "left_recursion" for s in history.steps))
 
-    def test_auxiliary_name_avoids_collisions(self):
-        g = grammar_from("S A Z1", "a b", "S", "S -> S A | a\nA -> b\nZ1 -> a")
+    def test_enumeration_avoids_terminal_names(self):
+        g = grammar_from("S A", "a X1", "S", "S -> S A | a\nA -> X1")
         history = self.assert_converts(g)
-        self.assertEqual(len(set(history.final_grammar.variables)), len(history.final_grammar.variables))
-        self.assertIn("Z1_2", history.final_grammar.variables)
+        final = history.final_grammar
+        self.assertEqual(len(set(final.variables)), len(final.variables))
+        self.assertFalse(set(final.variables) & set(final.terminals))
+        self.assertIn("V1.1", final.variables)
 
     def test_epsilon_is_preserved(self):
         g = grammar_from("S A B", "a b", "S", "S -> ε | A B\nA -> A B | a\nB -> b")
         history = self.assert_converts(g)
-        self.assertIn((), history.final_grammar.productions_of("S"))
+        final = history.final_grammar
+        self.assertIn((), final.productions_of(final.start))
 
     def test_deterministic_history(self):
         g = grammar_from("S A B", "a b", "S", "S -> A B\nA -> B S | a\nB -> S A | b")
@@ -124,9 +128,9 @@ class CleanupTests(unittest.TestCase):
     def test_epsilon_with_start_on_right_uses_new_start(self):
         g = grammar_from("S", "a b", "S", "S -> a S b | ε")
         history = self.assert_converts(g)
+        self.assertEqual(history.cnf_grammar["start"], "S0")
         final = history.final_grammar
-        self.assertEqual(final.start, "S0")
-        self.assertIn((), final.productions_of("S0"))
+        self.assertIn((), final.productions_of(final.start))
         self.assertFalse(final.start_appears_in_bodies())
 
     def test_useless_and_unreachable_removed(self):
@@ -135,7 +139,7 @@ class CleanupTests(unittest.TestCase):
         self.assertNotIn("D", history.final_grammar.variables)
         self.assertNotIn("E", history.final_grammar.variables)
         first_cleanup = next(s for s in history.steps if s.kind == "cleanup")
-        self.assertIn("D", first_cleanup.details[0])
+        self.assertIn("D", first_cleanup.details[1])  # Variables no generadoras
 
     def test_empty_language_is_rejected(self):
         g = grammar_from("S A", "a", "S", "S -> a S | A\nA -> A a")
@@ -160,8 +164,60 @@ class CleanupTests(unittest.TestCase):
         g = grammar_from("S", "a b", "S", "S -> a S b | a b")
         history = convert_to_gnf(g)
         cnf_heads = {p["head"]: p["bodies"] for p in history.cnf_grammar["productions"]}
-        self.assertEqual(cnf_heads.get("T1"), ["a"])
-        self.assertEqual(cnf_heads.get("T2"), ["b"])
+        # Como en la guía: A1 -> a, B1 -> b para terminales y Y1, Y2, ... para largas.
+        self.assertEqual(cnf_heads.get("A1"), ["a"])
+        self.assertEqual(cnf_heads.get("B1"), ["b"])
+        self.assertEqual(cnf_heads.get("Y1"), ["S B1"])
+        self.assertEqual(cnf_heads.get("S"), ["A1 Y1", "A1 B1"])
+
+    def test_cnf_stages_follow_the_guide(self):
+        g = grammar_from("S A", "a b", "S", "S -> A S A | a b | ε\nA -> S | a")
+        history = convert_to_gnf(g)
+        stages = [s.title for s in history.steps if s.phase == "fnc"]
+        self.assertEqual(
+            stages,
+            [
+                "Eliminación de símbolos no generadores",
+                "Eliminación de símbolos no alcanzables",
+                "Eliminación de producciones ε",
+                "Eliminación de producciones unitarias",
+                "Reemplazar terminales por variables",
+                "Reemplazar producciones de 3 o más variables",
+                "Gramática en Forma Normal de Chomsky",
+            ],
+        )
+        cnf = {p["head"]: p["bodies"] for p in history.cnf_grammar["productions"]}
+        self.assertEqual(history.cnf_grammar["start"], "S0")
+        self.assertIn("ε", cnf["S0"])
+
+    def test_guide_exercise(self):
+        """Ejercicio de guia_FNC_FNG.pdf: misma FNC (pág. 4) y misma enumeración (pág. 5)."""
+        g = grammar_from(
+            "S A B C D E F G", "a b c d", "S",
+            "S -> A | B C a | a D c d | E D F\nA -> a A b | c\n"
+            "B -> C D | b | E C d | A d\nC -> C c | B b | A a E | ε\n"
+            "D -> a D d | D d | ε\nE -> a a E B | E F G\nF -> a F d | d",
+        )
+        history = self.assert_converts(g)
+        cnf = {p["head"]: " | ".join(p["bodies"]) for p in history.cnf_grammar["productions"]}
+        self.assertEqual(cnf, {
+            "S": "A1 Y1 | c | B Y2 | B A1 | C A1 | a | A1 Y3 | A1 Y4",
+            "Y1": "A B1", "Y2": "C A1", "Y3": "D Y4", "Y4": "C1 D1",
+            "A": "A1 Y1 | c",
+            "B": "C D | C C1 | c | B B1 | b | A1 Y5 | A1 D1 | D D1 | d | A D1",
+            "Y5": "D D1",
+            "C": "C C1 | c | B B1 | b",
+            "D": "A1 Y5 | A1 D1 | D D1 | d",
+            "A1": "a", "B1": "b", "C1": "c", "D1": "d",
+        })
+        order = next(s for s in history.steps if s.kind == "order")
+        self.assertEqual(
+            order.details[:14],
+            [f"X{i} = {v}" + (" (símbolo inicial)" if i == 1 else "") for i, v in enumerate(
+                "S Y1 Y2 Y3 Y4 B Y5 C D A A1 B1 C1 D1".split(), start=1)],
+        )
+        aux = {v for v in history.final_grammar.variables if "." in v}
+        self.assertTrue({"X6.1", "X8.1", "X9.1"} <= aux)
 
     def test_large_grammar_fails_cleanly(self):
         from unittest import mock
@@ -172,15 +228,34 @@ class CleanupTests(unittest.TestCase):
                 convert_to_gnf(g)
         self.assertIn("demasiado", caught.exception.messages[0])
 
-    def test_indirect_before_direct_for_each_variable(self):
-        g = grammar_from("S A", "a b", "S", "S -> A S | b\nA -> S A | a")
+    def test_indirect_for_all_variables_before_immediate(self):
+        """Fase 1 (indirecta) en todas las variables antes de la fase 2 (inmediata)."""
+        g = grammar_from("S A B", "a b", "S", "S -> A B | a\nA -> B S | b\nB -> S A | a")
         history = self.assert_converts(g)
-        for name in ("S", "A"):
-            stages = [s.stage for s in history.steps if s.stage.startswith(name + " (")]
-            self.assertTrue(stages)
-            first_direct = next(i for i, st in enumerate(stages) if "inmediata" in st)
-            self.assertTrue(all("indirecta" in st for st in stages[:first_direct]))
-            self.assertTrue(all("inmediata" in st for st in stages[first_direct:]))
+        stages = [s.stage for s in history.steps if s.stage.startswith("Fase ")]
+        first_phase2 = next(i for i, st in enumerate(stages) if st.startswith("Fase 2"))
+        self.assertTrue(all(st.startswith("Fase 1") for st in stages[:first_phase2]))
+        self.assertTrue(all(st.startswith("Fase 2") for st in stages[first_phase2:]))
+        for name in ("X1", "X2", "X3"):
+            for phase in ("Fase 1", "Fase 2"):
+                self.assertTrue(any(st.startswith(phase) and f" · {name} (" in st for st in stages))
+
+    def test_immediate_brought_forward_only_when_needed(self):
+        # En la guía, X8 -> X6 X12 necesita a X6, que tiene X6 -> X6 X12.
+        g = grammar_from(
+            "S A B C D E F G", "a b c d", "S",
+            "S -> A | B C a | a D c d | E D F\nA -> a A b | c\n"
+            "B -> C D | b | E C d | A d\nC -> C c | B b | A a E | ε\n"
+            "D -> a D d | D d | ε\nE -> a a E B | E F G\nF -> a F d | d",
+        )
+        history = self.assert_converts(g)
+        early = [s for s in history.steps
+                 if s.kind == "left_recursion" and s.stage.startswith("Fase 1")]
+        self.assertEqual([s.title.split(":")[0] for s in early],
+                         ["Eliminación de recursividad izquierda en X6"])
+        later = [s.title for s in history.steps
+                 if s.kind == "left_recursion" and s.stage.startswith("Fase 2")]
+        self.assertEqual(len(later), 2)  # X8 y X9
 
     def test_equivalence_handles_epsilon_and_unit_cycles(self):
         g = grammar_from("S A", "a", "S", "S -> A | ε\nA -> S | a")

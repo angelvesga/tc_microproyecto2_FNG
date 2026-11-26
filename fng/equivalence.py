@@ -15,14 +15,17 @@ DEFAULT_MAX_LENGTH = 6
 MAX_STRINGS_PER_VARIABLE = 20000
 
 
-def language_up_to(grammar: Grammar, max_length: int = DEFAULT_MAX_LENGTH) -> Optional[Set[str]]:
+def language_up_to(
+    grammar: Grammar, max_length: int = DEFAULT_MAX_LENGTH, separator: Optional[str] = None
+) -> Optional[Set[str]]:
     """Cadenas de longitud <= max_length generadas por el símbolo inicial.
 
     Devuelve ``None`` si la enumeración excede el límite de seguridad.
     Los terminales se concatenan tal cual (separados por espacio si alguno
     tiene más de un carácter) para evitar ambigüedades.
     """
-    separator = " " if any(len(t) > 1 for t in grammar.terminals) else ""
+    if separator is None:
+        separator = _separator(grammar)
     generated: Dict[str, Set[tuple]] = {v: set() for v in grammar.variables}
 
     changed = True
@@ -37,6 +40,10 @@ def language_up_to(grammar: Grammar, max_length: int = DEFAULT_MAX_LENGTH) -> Op
                     if len(bucket) > MAX_STRINGS_PER_VARIABLE:
                         return None
     return {separator.join(w) for w in generated.get(grammar.start, set())}
+
+
+def _separator(*grammars: Grammar) -> str:
+    return " " if any(len(t) > 1 for g in grammars for t in g.terminals) else ""
 
 
 def _expand(grammar: Grammar, body, generated, max_length):
@@ -55,8 +62,10 @@ def _expand(grammar: Grammar, body, generated, max_length):
 
 def equivalent_up_to(first: Grammar, second: Grammar, max_length: int = DEFAULT_MAX_LENGTH):
     """Devuelve (equivalentes, lenguaje_1, lenguaje_2); ``None`` si no se pudo decidir."""
-    lang_a = language_up_to(first, max_length)
-    lang_b = language_up_to(second, max_length)
+    # Mismo separador para ambas: la depuración puede quitar terminales inalcanzables.
+    separator = _separator(first, second)
+    lang_a = language_up_to(first, max_length, separator)
+    lang_b = language_up_to(second, max_length, separator)
     if lang_a is None or lang_b is None:
         return None, lang_a, lang_b
     return lang_a == lang_b, lang_a, lang_b

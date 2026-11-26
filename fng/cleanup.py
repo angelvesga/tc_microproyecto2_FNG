@@ -1,25 +1,64 @@
 """Depuración de una GLC cualquiera y conversión a Forma Normal de Chomsky.
 
-Etapas (cada operación se registra como un paso del historial):
+Sigue el procedimiento de la guía del curso (``guia_FNC_FNG.pdf``). Cada etapa
+queda registrada como un paso del historial:
 
-1. Depuración inicial: variables no generadoras y luego inalcanzables.
-2. Nuevo símbolo inicial S0 -> S, solo si S genera ε y aparece a la derecha.
-3. Eliminación de producciones nulas (A -> ε), conservando S -> ε si ε ∈ L(G).
-4. Eliminación de producciones unitarias (A -> B), con clausura (admite ciclos).
-5. Depuración final: no generadoras e inalcanzables otra vez.
-6. FNC: terminales en cuerpos largos (T1 -> a, T2 -> b, ...) y binarización (X_i).
+Forma intermedia de Chomsky
+1. Símbolos no generadores: se eliminan con todas las producciones que los usan.
+2. Símbolos no alcanzables desde el inicial (variables y terminales).
+3. Producciones ε: con las variables anulables se generan todas las
+   combinaciones en que cada una aparece o no. Si el inicial es anulable se
+   conserva la cadena vacía: ``S0 -> S | ε`` si S aparece a la derecha, o
+   ``S -> ε`` si no aparece.
+4. Producciones unitarias, con pares unitarios: cada ``A -> B`` se reemplaza,
+   en su lugar, por las producciones no unitarias de B.
+   (Si tras 3 y 4 quedan símbolos inútiles se eliminan otra vez.)
+
+Forma Normal de Chomsky
+5. Reemplazar terminales por variables (``A1 -> a``, ``B1 -> b``, ...) en los
+   cuerpos de longitud >= 2.
+6. Reemplazar producciones de 3 o más variables: ``Y -> X α`` pasa a
+   ``Y -> X Y1`` con ``Y1 -> α`` (Y1, Y2, ...), reutilizando la variable cuando
+   la misma cola ya fue procesada.
+
+Las producciones conservan el orden en que están escritas (los reemplazos se
+hacen en su lugar), como en la guía; así los nombres Y1, Y2, ... salen en el
+mismo orden que en el ejercicio de la guía.
 """
 
 from __future__ import annotations
 
 from itertools import product
-from typing import Callable, Dict, List, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Set, Tuple
 
 from .errors import ConversionError
-from .grammar import Body, Grammar, format_body, format_production, fresh_name
+from .grammar import Body, Grammar, format_production
 from .validator import check_cnf
 
 LogFunction = Callable[..., object]
+Production = Tuple[str, Body]
+
+MAX_EXPANSION = 5000
+
+STAGE_USELESS = "Símbolos inútiles"
+STAGE_NULL = "Producciones ε"
+STAGE_UNIT = "Producciones unitarias"
+STAGE_CNF = "Forma Normal de Chomsky"
+
+
+def _set_text(symbols: Iterable[str], order: Sequence[str]) -> str:
+    """Muestra un conjunto en el orden de declaración: { A, B } (o ∅)."""
+    symbols = set(symbols)
+    items = [s for s in order if s in symbols]
+    return "{ " + ", ".join(items) + " }" if items else "∅"
+
+
+def _productions_text(productions: Iterable[Production]) -> str:
+    return ", ".join(format_production(h, b) for h, b in productions) or "ninguna"
+
+
+def _unique(items: Iterable) -> List:
+    return list(dict.fromkeys(items))
 
 
 class CnfNormalizer:
@@ -28,34 +67,75 @@ class CnfNormalizer:
     def __init__(
         self,
         grammar: Grammar,
-        original: Grammar,
         log: LogFunction,
         check_size: Callable[[], None],
     ) -> None:
         self.grammar = grammar
-        self.original = original
         self.log = log
         self.check_size = check_size
-        self._terminal_count = 0  # variables T1, T2, ... creadas para terminales
+        # Variables creadas para los terminales (A1 -> a, ...): la fase de
+        # Greibach las enumera al final, como en la guía.
+        self.terminal_variables: List[str] = []
 
     def run(self) -> None:
-        self._remove_useless("Depuración inicial", initial=True)
-        self._new_start_symbol()
+        self._remove_non_generating()
+        self._remove_unreachable()
         self._remove_null_productions()
         self._remove_unit_productions()
-        self._remove_useless("Depuración final", initial=False)
-        self._to_cnf()
+        self._remove_leftover_useless()
+        self._replace_terminals()
+        self._reduce_long_productions()
+        self._check_cnf()
 
     # ------------------------------------------------------------------
-    # Símbolos inútiles
+    # Utilidades
+    # ------------------------------------------------------------------
+    def _productions(self) -> List[Production]:
+        """Pares (cabeza, cuerpo) en el orden en que están escritos."""
+        return list(self.grammar.all_productions())
+
+    def _is_unit(self, body: Body) -> bool:
+        return len(body) == 1 and self.grammar.is_variable(body[0])
+
+    def _taken(self, name: str) -> bool:
+        g = self.grammar
+        return name in g.variables or name in g.terminals or name in g.productions
+
+    def _log_step(
+        self,
+        kind: str,
+        stage: str,
+        title: str,
+        description: str,
+        identified: List[str],
+        before: List[Production],
+        highlight: Sequence[str] = (),
+    ) -> None:
+        """Registra la etapa con lo identificado y las producciones eliminadas y
+        agregadas, calculadas comparando el antes y el después."""
+        after = self._productions()
+        before_set, after_set = set(before), set(after)
+        details = list(identified) + [
+            "Producciones eliminadas: "
+            + _productions_text(p for p in before if p not in after_set),
+            "Producciones agregadas: "
+            + _productions_text(p for p in after if p not in before_set),
+        ]
+        self.log(kind, stage, title, description, details, highlight=list(highlight))
+        self.check_size()
+
+    # ------------------------------------------------------------------
+    # 1 y 2. Símbolos inútiles: no generadores y no alcanzables
     # ------------------------------------------------------------------
     def _generating(self) -> Set[str]:
+        """Variables con alguna producción formada solo por símbolos generadores
+        (los terminales y ε son generadores)."""
         g = self.grammar
         generating: Set[str] = set()
         changed = True
         while changed:
             changed = False
-            for head, body in g.all_productions():
+            for head, body in self._productions():
                 if head not in generating and all(
                     g.is_terminal(s) or s in generating for s in body
                 ):
@@ -64,361 +144,366 @@ class CnfNormalizer:
         return generating
 
     def _reachable(self) -> Set[str]:
+        """Símbolos (variables y terminales) alcanzables desde el inicial."""
         g = self.grammar
         reachable = {g.start}
-        frontier = [g.start]
-        while frontier:
-            for body in g.productions_of(frontier.pop()):
+        pending = [g.start]
+        while pending:
+            for body in g.productions_of(pending.pop(0)):
                 for symbol in body:
-                    if g.is_variable(symbol) and symbol not in reachable:
+                    if symbol not in reachable:
                         reachable.add(symbol)
-                        frontier.append(symbol)
+                        if g.is_variable(symbol):
+                            pending.append(symbol)
         return reachable
 
-    def _remove_useless(self, stage: str, initial: bool) -> None:
+    def _drop_variables(self, variables: Sequence[str]) -> None:
+        """Quita las variables y toda producción que las use."""
         g = self.grammar
-        generating = self._generating()
-        if g.start not in generating:
-            raise ConversionError(
-                [
-                    f"El símbolo inicial {g.start} no genera ninguna cadena de terminales: "
-                    "la gramática genera el lenguaje vacío y no puede convertirse."
-                ]
-            )
-        useless = [v for v in g.variables if v not in generating]
-        removed_bodies = [
-            format_production(h, b)
-            for h, b in g.all_productions()
-            if h not in generating or any(g.is_variable(s) and s not in generating for s in b)
-        ]
-        for variable in useless:
+        gone = set(variables)
+        for variable in variables:
             g.remove_variable(variable)
         for head in list(g.productions):
             g.set_productions(
-                head, [b for b in g.productions_of(head) if all(s not in useless for s in b)]
-            )
-        if useless:
-            details = [f"Variables no generadoras: {', '.join(useless)}"]
-            if removed_bodies:
-                details.append("Producciones eliminadas: " + ", ".join(removed_bodies))
-            self.log(
-                "cleanup",
-                stage,
-                "Eliminación de variables no generadoras (inútiles)",
-                "Una variable es generadora si deriva alguna cadena de terminales. Las "
-                "que no lo son, y toda producción que las use, se eliminan sin cambiar "
-                "el lenguaje.",
-                details,
-                highlight=useless,
-            )
-        else:
-            self.log(
-                "cleanup",
-                stage,
-                "Variables no generadoras: no hay",
-                "Todas las variables derivan al menos una cadena de terminales.",
+                head, [b for b in g.productions_of(head) if not gone.intersection(b)]
             )
 
+    def _remove_non_generating(self) -> None:
+        g = self.grammar
+        before = self._productions()
+        generating = self._generating()
+        useless = [v for v in g.variables if v not in generating]
+        if g.start not in generating:
+            raise ConversionError(
+                [
+                    f"El lenguaje es vacío: el símbolo inicial {g.start} no genera ninguna "
+                    "cadena terminal, por lo que la gramática no puede convertirse."
+                ]
+            )
+        identified = [
+            f"Variables generadoras: {_set_text(generating, g.variables)}",
+            f"Variables no generadoras: {_set_text(useless, g.variables)}",
+        ]
+        self._drop_variables(useless)
+        self._log_step(
+            "cleanup",
+            STAGE_USELESS,
+            "Eliminación de símbolos no generadores",
+            "Los terminales y ε son generadores; una variable es generadora si tiene "
+            "por lo menos una producción formada únicamente por símbolos generadores. "
+            "Las que no lo son se eliminan junto con toda producción en la que estén.",
+            identified,
+            before,
+            useless,
+        )
+
+    def _remove_unreachable(self) -> None:
+        g = self.grammar
+        before = self._productions()
+        order = g.variables + g.terminals
         reachable = self._reachable()
-        unreachable = [v for v in g.variables if v not in reachable]
-        for variable in unreachable:
-            g.remove_variable(variable)
-        if unreachable:
-            self.log(
-                "cleanup",
-                stage,
-                "Eliminación de variables inalcanzables",
-                f"Estas variables no aparecen en ninguna derivación desde {g.start}, "
-                "por lo que se eliminan.",
-                [f"Eliminadas: {', '.join(unreachable)}"],
-                highlight=unreachable,
-            )
-        else:
-            self.log(
-                "cleanup",
-                stage,
-                "Variables inalcanzables: no hay",
-                f"Todas las variables se alcanzan desde {g.start}.",
-            )
-        self.check_size()
+        unreachable_vars = [v for v in g.variables if v not in reachable]
+        unreachable_terms = [t for t in g.terminals if t not in reachable]
+        identified = [
+            f"Símbolos alcanzables: {_set_text(reachable, order)}",
+            f"Variables no alcanzables: {_set_text(unreachable_vars, g.variables)}",
+            f"Terminales no alcanzables: {_set_text(unreachable_terms, g.terminals)}",
+        ]
+        self._drop_variables(unreachable_vars)
+        for terminal in unreachable_terms:
+            g.terminals.remove(terminal)
+        self._log_step(
+            "cleanup",
+            STAGE_USELESS,
+            "Eliminación de símbolos no alcanzables",
+            f"Se eliminan los símbolos que no se pueden derivar, directa o "
+            f"indirectamente, desde el símbolo inicial {g.start}.",
+            identified,
+            before,
+            unreachable_vars,
+        )
 
     # ------------------------------------------------------------------
-    # Producciones nulas
+    # 3. Producciones ε
     # ------------------------------------------------------------------
     def _nullable(self) -> Set[str]:
+        """Variables con Y -> ε o con una producción formada solo por anulables."""
         nullable: Set[str] = set()
         changed = True
         while changed:
             changed = False
-            for head, body in self.grammar.all_productions():
+            for head, body in self._productions():
                 if head not in nullable and all(s in nullable for s in body):
                     nullable.add(head)
                     changed = True
         return nullable
 
-    def _new_start_symbol(self) -> None:
-        g = self.grammar
-        if g.start not in self._nullable() or not g.start_appears_in_bodies():
-            return
-        old = g.start
-        new = fresh_name("S0", g, self.original)
-        g.variables.insert(0, new)
-        g.start = new
-        g.set_productions(new, [(old,)])
-        self.log(
-            "start",
-            "Nuevo símbolo inicial",
-            f"Se crea el símbolo inicial {new} -> {old}",
-            f"{old} genera ε y aparece en partes derechas. Para poder conservar la "
-            f"cadena vacía con {new} -> ε (sin que {new} aparezca a la derecha) se "
-            "agrega un nuevo símbolo inicial.",
-            highlight=[new, old],
-        )
+    def _new_start_name(self, base: str) -> str:
+        name, suffix = base, 1
+        while self._taken(name):
+            name = f"{base}_{suffix}"
+            suffix += 1
+        return name
 
     def _remove_null_productions(self) -> None:
         g = self.grammar
-        stage = "Producciones nulas"
+        before = self._productions()
         nullable = self._nullable()
-        if not nullable:
-            self.log(
-                "null",
-                stage,
-                "Producciones nulas: no hay",
-                "Ninguna variable deriva ε, no hay nada que eliminar.",
-            )
-            return
-
-        total = sum(
-            2 ** sum(1 for s in b if s in nullable) for _, b in g.all_productions()
-        )
+        total = sum(2 ** sum(1 for s in b if s in nullable) for _, b in before)
         if total > MAX_EXPANSION:
             raise ConversionError(
-                ["Eliminar las producciones nulas genera demasiadas producciones."]
+                ["Eliminar las producciones ε genera demasiadas producciones."]
             )
 
-        added: List[str] = []
-        removed: List[str] = []
+        start_on_right = g.start_appears_in_bodies()
         for head in list(g.heads_in_order()):
-            new_bodies: List[Body] = []
+            bodies: List[Body] = []
             for body in g.productions_of(head):
-                if not body:
-                    removed.append(format_production(head, body))
-                    continue
-                options = [((s,), ()) if s in nullable else ((s,),) for s in body]
-                for choice in product(*options):
-                    candidate = tuple(s for part in choice for s in part)
-                    if candidate and candidate not in new_bodies:
-                        new_bodies.append(candidate)
-                        if candidate != body:
-                            added.append(format_production(head, candidate))
-            g.set_productions(head, new_bodies)
+                positions = [i for i, s in enumerate(body) if s in nullable]
+                # Cada anulable aparece (True) o no (False): a lo más 2^n versiones.
+                for keep in product([True, False], repeat=len(positions)):
+                    kept = dict(zip(positions, keep))
+                    candidate = tuple(s for i, s in enumerate(body) if kept.get(i, True))
+                    if candidate:
+                        bodies.append(candidate)
+            g.set_productions(head, bodies)
 
-        keeps_epsilon = g.start in nullable
-        if keeps_epsilon:
-            g.set_productions(g.start, [()] + list(g.productions_of(g.start)))
-
-        details = [
-            f"Variables anulables (derivan ε): {', '.join(v for v in g.variables if v in nullable)}",
-            "Producciones ε eliminadas: " + (", ".join(removed) or "ninguna"),
-            "Producciones agregadas (omitiendo anulables): " + (", ".join(added) or "ninguna"),
-        ]
-        if keeps_epsilon:
-            details.append(
-                f"Como ε pertenece al lenguaje, se conserva {g.start} -> ε "
-                f"({g.start} no aparece a la derecha)."
+        highlight = [v for v in g.variables if v in nullable]
+        if g.start not in nullable:
+            decision = "el lenguaje no contiene ε"
+        elif start_on_right:
+            old = g.start
+            new = self._new_start_name(old + "0")
+            g.variables.insert(0, new)
+            g.start = new
+            g.set_productions(new, [(old,), ()])
+            decision = (
+                f"ε pertenece al lenguaje y {old} aparece a la derecha: nuevo símbolo "
+                f"inicial {new} -> {old} | ε"
             )
-        self.log(
+            highlight.insert(0, new)
+        else:
+            g.set_productions(g.start, list(g.productions_of(g.start)) + [()])
+            decision = (
+                f"ε pertenece al lenguaje y {g.start} no aparece a la derecha: se "
+                f"conserva {g.start} -> ε"
+            )
+
+        self._log_step(
             "null",
-            stage,
-            "Eliminación de producciones nulas",
-            "Se calculan las variables anulables y, en cada producción, se agregan "
-            "todas las variantes que omiten alguna de ellas; luego se eliminan las "
-            "producciones A -> ε.",
-            details,
-            highlight=sorted(nullable),
+            STAGE_NULL,
+            "Eliminación de producciones ε",
+            "Se identifican las variables anulables y, en cada producción, se "
+            "contemplan todas las combinaciones en que cada una aparece o no (con n "
+            "anulables, a lo más 2^n producciones). Las producciones X -> ε se eliminan.",
+            [
+                f"Variables anulables: {_set_text(nullable, g.variables)}",
+                f"Decisión ε: {decision}",
+            ],
+            before,
+            highlight,
         )
-        self.check_size()
 
     # ------------------------------------------------------------------
-    # Producciones unitarias
+    # 4. Producciones unitarias
     # ------------------------------------------------------------------
-    def _is_unit(self, body: Body) -> bool:
-        return len(body) == 1 and self.grammar.is_variable(body[0])
+    def _unit_closure(self, variable: str) -> Tuple[List[str], List[Body]]:
+        """Pares unitarios de ``variable`` (en orden de aparición) y sus
+        producciones con cada unitaria reemplazada, en su lugar, por las no
+        unitarias de la variable a la que apunta."""
+        reached = [variable]
+        bodies: List[Body] = []
+
+        def visit(current: str) -> None:
+            for body in self.grammar.productions_of(current):
+                if not self._is_unit(body):
+                    bodies.append(body)
+                elif body[0] not in reached:
+                    reached.append(body[0])
+                    visit(body[0])
+
+        visit(variable)
+        return reached, _unique(bodies)
 
     def _remove_unit_productions(self) -> None:
         g = self.grammar
-        stage = "Producciones unitarias"
-        if not any(self._is_unit(b) for _, b in g.all_productions()):
-            self.log(
-                "unit",
-                stage,
-                "Producciones unitarias: no hay",
-                "Ninguna producción es de la forma A -> B.",
-            )
-            return
-
-        closures: Dict[str, List[str]] = {}
-        for variable in g.variables:
-            closure = [variable]
-            for current in closure:
-                for body in g.productions_of(current):
-                    if self._is_unit(body) and body[0] not in closure:
-                        closure.append(body[0])
-            closures[variable] = closure
-
-        details = [
-            f"Pares unitarios de {v}: {', '.join(c[1:])}"
-            for v, c in closures.items()
-            if len(c) > 1
-        ]
-        units = [format_production(h, b) for h, b in g.all_productions() if self._is_unit(b)]
-        new_productions = {
-            v: [b for member in closure for b in g.productions_of(member) if not self._is_unit(b)]
-            for v, closure in closures.items()
-        }
-        for variable, bodies in new_productions.items():
+        before = self._productions()
+        units = [(h, b) for h, b in before if self._is_unit(b)]
+        closures = {v: self._unit_closure(v) for v in g.heads_in_order()}
+        for variable, (_, bodies) in closures.items():
             g.set_productions(variable, bodies)
-        details.append("Producciones unitarias eliminadas: " + ", ".join(units))
-        self.log(
+
+        pairs = [f"({v}, {w})" for v, (reached, _) in closures.items() for w in reached]
+        self._log_step(
             "unit",
-            stage,
+            STAGE_UNIT,
             "Eliminación de producciones unitarias",
-            "Para cada par unitario (A, B) —A deriva B usando solo producciones "
-            "unitarias— se copian a A las producciones no unitarias de B y se "
-            "eliminan las producciones A -> B.",
-            details,
-            highlight=[v for v, c in closures.items() if len(c) > 1],
+            "Pares unitarios: (Y, Y) lo es para toda variable, y si (Y, X) lo es y "
+            "X -> Z es unitaria, (Y, Z) también. Por cada par (X, Y) se agregan a X las "
+            "producciones de Y que no son unitarias, en el lugar de X -> Y.",
+            [
+                "Producciones unitarias: "
+                + (", ".join(format_production(h, b) for h, b in units) or "∅"),
+                "Pares unitarios: " + (", ".join(pairs) or "∅"),
+            ],
+            before,
+            [v for v, (reached, _) in closures.items() if len(reached) > 1],
         )
-        self.check_size()
+
+    def _remove_leftover_useless(self) -> None:
+        """Al quitar ε y unitarias puede quedar una variable sin producciones o
+        inalcanzable; en ese caso se depura otra vez para que la FNC quede limpia."""
+        g = self.grammar
+        generating = self._generating()
+        useless = [v for v in g.variables if v not in generating]
+        if useless:
+            before = self._productions()
+            self._drop_variables(useless)
+            self._log_step(
+                "cleanup",
+                STAGE_UNIT,
+                "Eliminación de símbolos no generadores (de nuevo)",
+                "Tras quitar las producciones ε y unitarias, estas variables ya no "
+                "generan ninguna cadena; se eliminan con las producciones que las usan.",
+                [f"Variables no generadoras: {_set_text(useless, g.variables + useless)}"],
+                before,
+                useless,
+            )
+        reachable = self._reachable()
+        unreachable_vars = [v for v in g.variables if v not in reachable]
+        unreachable_terms = [t for t in g.terminals if t not in reachable]
+        if unreachable_vars or unreachable_terms:
+            before = self._productions()
+            order_vars, order_terms = list(g.variables), list(g.terminals)
+            self._drop_variables(unreachable_vars)
+            for terminal in unreachable_terms:
+                g.terminals.remove(terminal)
+            self._log_step(
+                "cleanup",
+                STAGE_UNIT,
+                "Eliminación de símbolos no alcanzables (de nuevo)",
+                f"Tras quitar las producciones unitarias, estos símbolos ya no se "
+                f"alcanzan desde {g.start}; se eliminan.",
+                [
+                    f"Variables no alcanzables: {_set_text(unreachable_vars, order_vars)}",
+                    f"Terminales no alcanzables: {_set_text(unreachable_terms, order_terms)}",
+                ],
+                before,
+                unreachable_vars,
+            )
 
     # ------------------------------------------------------------------
-    # Forma Normal de Chomsky
+    # 5. Reemplazar terminales por variables
     # ------------------------------------------------------------------
-    def _to_cnf(self) -> None:
+    def _terminal_variable_name(self, terminal: str) -> str:
+        """A1 para a, B1 para b, ... (T1, T2, ... si el terminal no es una letra)."""
+        base = terminal.upper() if terminal.isalpha() else "T"
+        number = 1
+        while self._taken(f"{base}{number}"):
+            number += 1
+        return f"{base}{number}"
+
+    def _replace_terminals(self) -> None:
         g = self.grammar
-        stage = "Forma Normal de Chomsky"
-        self._replace_terminals(stage)
-        self._binarize(stage)
+        before = self._productions()
+        needed = {s for _, b in before if len(b) >= 2 for s in b if g.is_terminal(s)}
+        created: Dict[str, str] = {}
+        for terminal in g.terminals:
+            if terminal in needed:
+                name = self._terminal_variable_name(terminal)
+                g.add_variable(name)
+                created[terminal] = name
+        for head in list(g.heads_in_order()):
+            g.set_productions(
+                head,
+                [
+                    tuple(created.get(s, s) for s in b) if len(b) >= 2 else b
+                    for b in g.productions_of(head)
+                ],
+            )
+        for terminal, name in created.items():
+            g.set_productions(name, [(terminal,)])
+        self.terminal_variables = list(created.values())
+
+        if created:
+            identified = [f"Terminal '{t}' reemplazado por la variable {v}" for t, v in created.items()]
+        else:
+            identified = ["Ningún terminal aparece acompañado en una producción."]
+        self._log_step(
+            "cnf",
+            STAGE_CNF,
+            "Reemplazar terminales por variables",
+            "Cada terminal que aparece acompañado de otros símbolos en una producción "
+            "se reemplaza por una variable nueva cuya única producción es ese terminal.",
+            identified,
+            before,
+            list(created.values()),
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Reemplazar producciones de 3 o más variables
+    # ------------------------------------------------------------------
+    def _reduce_long_productions(self) -> None:
+        g = self.grammar
+        before = self._productions()
+        tails: Dict[Body, str] = {}
+        last_inserted: Dict[str, str] = {}  # cada Yk se lista tras la variable que la originó
+        counter = 0
+
+        def variable_for(tail: Body, creator: str) -> str:
+            nonlocal counter
+            if tail not in tails:
+                while True:
+                    counter += 1
+                    name = f"Y{counter}"
+                    if not self._taken(name):
+                        break
+                g.add_variable(name, after=last_inserted.get(creator, creator))
+                last_inserted[creator] = name
+                tails[tail] = name
+            return tails[tail]
+
+        new_productions: Dict[str, List[Body]] = {}
+        for head in list(g.heads_in_order()):
+            for body in g.productions_of(head):
+                current, symbols = head, body
+                while len(symbols) > 2:
+                    tail = symbols[1:]
+                    variable = variable_for(tail, head)
+                    new_productions.setdefault(current, []).append((symbols[0], variable))
+                    current, symbols = variable, tail
+                new_productions.setdefault(current, []).append(symbols)
+        for head, bodies in new_productions.items():
+            g.set_productions(head, bodies)
+
+        if tails:
+            identified = [
+                f"{v} -> {' '.join(tail)}" for tail, v in sorted(tails.items(), key=lambda i: int(i[1][1:]))
+            ]
+        else:
+            identified = ["No hay producciones de 3 o más variables."]
+        self._log_step(
+            "cnf",
+            STAGE_CNF,
+            "Reemplazar producciones de 3 o más variables",
+            "Cada producción Y -> X α, con α de dos o más variables, se reemplaza por "
+            "Y -> X Z con Z -> α (repitiendo si α tiene más de dos). La misma cola "
+            "reutiliza la misma variable.",
+            identified,
+            before,
+            list(tails.values()),
+        )
+
+    def _check_cnf(self) -> None:
+        g = self.grammar
         errors = check_cnf(g)
         if errors:  # pragma: no cover - no debería ocurrir
             raise ConversionError(["Error interno al construir la FNC:"] + errors)
         self.log(
             "cnf",
-            stage,
+            STAGE_CNF,
             "Gramática en Forma Normal de Chomsky",
-            "Toda producción es A -> BC o A -> a (y S -> ε solo si S no aparece a la "
-            "derecha). Ahora se puede aplicar la conversión a Greibach.",
+            "Toda producción es X -> Y Z (dos variables) o W -> v (un terminal), y "
+            "S -> ε solo si S no aparece a la derecha. Ahora se puede llevar a Greibach.",
             highlight=list(g.variables),
         )
-
-    def _terminal_variable(self, terminal: str, created: Dict[str, str]) -> Tuple[str, bool]:
-        """Variable cuya única producción es ``terminal`` (reutiliza si ya existe)."""
-        if terminal in created:
-            return created[terminal], False
-        g = self.grammar
-        for variable in g.variables:
-            if variable != g.start and g.productions_of(variable) == [(terminal,)]:
-                created[terminal] = variable
-                return variable, False
-        while True:  # siguiente T1, T2, ... libre
-            self._terminal_count += 1
-            name = f"T{self._terminal_count}"
-            if fresh_name(name, g, self.original) == name:
-                break
-        g.add_variable(name)
-        g.set_productions(name, [(terminal,)])
-        created[terminal] = name
-        return name, True
-
-    def _replace_terminals(self, stage: str) -> None:
-        g = self.grammar
-        created: Dict[str, str] = {}
-        new_vars: List[str] = []
-        changed: List[str] = []
-        for head in list(g.heads_in_order()):
-            bodies = []
-            for body in g.productions_of(head):
-                if len(body) >= 2 and any(g.is_terminal(s) for s in body):
-                    replaced = []
-                    for s in body:
-                        if g.is_terminal(s):
-                            variable, is_new = self._terminal_variable(s, created)
-                            if is_new:
-                                new_vars.append(variable)
-                            replaced.append(variable)
-                        else:
-                            replaced.append(s)
-                    changed.append(f"{format_production(head, body)}  ⇒  {format_body(replaced)}")
-                    bodies.append(tuple(replaced))
-                else:
-                    bodies.append(body)
-            g.set_productions(head, bodies)
-        if not changed:
-            self.log(
-                "cnf",
-                stage,
-                "Terminales en producciones largas: no hay",
-                "Ninguna producción de longitud ≥ 2 contiene terminales.",
-            )
-            return
-        self.log(
-            "cnf",
-            stage,
-            "Reemplazo de terminales en producciones largas",
-            "En las producciones de longitud ≥ 2, cada terminal a se sustituye por "
-            "una variable cuya única producción es a.",
-            ["Variables usadas: " + ", ".join(f"{v} -> {t}" for t, v in created.items())]
-            + changed,
-            highlight=new_vars or list(created.values()),
-        )
-        self.check_size()
-
-    def _binarize(self, stage: str) -> None:
-        g = self.grammar
-        tails: Dict[Body, str] = {}
-        new_vars: List[str] = []
-        changed: List[str] = []
-
-        def variable_for(tail: Body) -> str:
-            if tail in tails:
-                return tails[tail]
-            rest = tail if len(tail) == 2 else (tail[0], variable_for(tail[1:]))
-            name = fresh_name(f"X{len(new_vars) + 1}", g, self.original)
-            g.add_variable(name)
-            g.set_productions(name, [rest])
-            tails[tail] = name
-            new_vars.append(name)
-            return name
-
-        for head in list(g.heads_in_order()):
-            bodies = []
-            for body in g.productions_of(head):
-                if len(body) > 2:
-                    new_body = (body[0], variable_for(body[1:]))
-                    changed.append(f"{format_production(head, body)}  ⇒  {format_body(new_body)}")
-                    bodies.append(new_body)
-                else:
-                    bodies.append(body)
-            g.set_productions(head, bodies)
-
-        if not changed:
-            self.log(
-                "cnf",
-                stage,
-                "Producciones de más de dos variables: no hay",
-                "Todas las producciones tienen a lo sumo dos símbolos.",
-            )
-            return
-        self.log(
-            "cnf",
-            stage,
-            "División de producciones largas",
-            "Cada producción A -> B1 B2 ... Bn (n > 2) se divide en A -> B1 X y "
-            "X -> B2 ... Bn, repitiendo hasta que todas tengan dos variables.",
-            [f"{v} -> {format_body(g.productions_of(v)[0])}" for v in new_vars] + changed,
-            highlight=new_vars,
-        )
-        self.check_size()
-
-
-MAX_EXPANSION = 5000

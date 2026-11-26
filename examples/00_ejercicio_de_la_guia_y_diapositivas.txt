@@ -1,0 +1,14 @@
+# Ejercicio de la guía "Ejercicio Guía para obtener FNC y FNG" y de las diapositivas de FNG.
+# E y G no son generadoras (G no tiene producciones) y F queda no alcanzable.
+# La FNC resultante es la de la diapositiva 4 y la enumeración X1..X14 la de la diapositiva 5.
+Variables: S, A, B, C, D, E, F, G
+Terminales: a, b, c, d
+Inicial: S
+Producciones:
+S -> A | B C a | a D c d | E D F
+A -> a A b | c
+B -> C D | b | E C d | A d
+C -> C c | B b | A a E | ε
+D -> a D d | D d | ε
+E -> a a E B | E F G
+F -> a F d | d
